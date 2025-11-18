@@ -5,7 +5,7 @@ Im Förderprojekt [KI-Allianz Baden-Württemberg, Teilvorhaben Datenplattform](h
 
 ## Übersicht
 
-Dieser Fork basiert auf der [Piveau-Hub-Search](https://gitlab.com/piveau/hub/piveau-hub-search/-/tree/5.1.8) Komponente (v5.1.8) von [Fraunhofer FOKUS](https://www.fokus.fraunhofer.de). Die Komponente kapselt Indizierungs- und Suchanfragen für [Elasticsearch](https://www.elastic.co) innerhalb der Open-Source Datenmanagementplattform [Piveau](https://www.piveau.de/) als REST-Service. 
+Dieser Fork basiert auf der [Piveau-Hub-Search](https://gitlab.com/piveau/hub/piveau-hub-search/-/tree/5.1.8) Komponente (v5.1.8) von [Fraunhofer FOKUS](https://www.fokus.fraunhofer.de). Die Komponente kapselt Indizierungs- und Suchanfragen für [Elasticsearch](https://www.elastic.co) (von Elasticsearch B.V.) innerhalb der Open-Source Datenmanagementplattform [Piveau](https://www.piveau.de/) als REST-Service. 
 
 Dieser Fork erweitert die Piveau-Hub-Search Komponente um eine **semantische Suchfunktion**, zusätzlich zur bestehenden lexikalischen Suche. Hierfür werden Word-Embeddings und die Vektorsuchfunktionen aus der kostenfreien Elasticsearch-Version genutzt. Vorteile der semantischen Suche sind die Erkennung inhaltlicher Verwandtschaft (thematisch ähnliche Begriffe liegen nah beieinander im Vektorraum), eine verbesserte Treffergenauigkeit (z.B. findet die Suche nach „Bahn“ auch „Schienenverkehr“) und die Möglichkeit zur sprachübergreifenden Suche. Die Auffindbarkeit inhaltlich relevanter Datensätze wird dadurch signifikant verbessert.
 
