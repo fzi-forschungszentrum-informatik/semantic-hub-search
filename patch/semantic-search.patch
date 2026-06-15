@@ -1,0 +1,2128 @@
+diff --git a/.gitignore b/.gitignore
+index 62238fa3..88c9e792 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -19,3 +19,5 @@ conf/config.json
+ .idea/
+ .mvn
+ .DS_Store
++Makefile
++INSIGHTS.md
+\ No newline at end of file
+diff --git a/SEMANTIC-SEARCH.md b/SEMANTIC-SEARCH.md
+new file mode 100644
+index 00000000..3048b4e7
+--- /dev/null
++++ b/SEMANTIC-SEARCH.md
+@@ -0,0 +1,112 @@
++# Semantic Search in Piveau Hub Search
++
++This document describes the implementation of semantic search features in piveau-hub-search, including dataset enrichment with embeddings and hybrid search capabilities.
++
++## Overview
++
++Semantic search enhances traditional keyword-based search by understanding the intent and contextual meaning of search queries. In this implementation, we use vector embeddings to represent both documents (datasets) and search queries in the same high-dimensional space, allowing for similarity-based retrieval.
++
++The core components of the semantic search feature are:
++- **Embedding Service**: A service to generate vector representations from text.
++- **Dataset Enrichment**: Automatically generating and storing embeddings for datasets.
++- **Hybrid Search**: Combining traditional BM25 full-text search with k-nearest neighbors (kNN) vector search.
++
++---
++
++## Components and Features
++
++### 1. Embedding Service
++The `EmbeddingService` is responsible for communicating with an external embedding provider (Ollama) to transform text into numerical vectors.
++
++- **Implementation**: `src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceImpl.java`
++- **Model**: By default, it uses the `paraphrase-multilingual` embedding model via Ollama, as it supports german and english languages quite well.
++- **Main Methods**:
++    - `generateEmbedding(String text)`: Converts a string into a semantic vector (float array).
++    - `enrichDatasetWithEmbeddings(JsonObject dataset)`: Extracts relevant text fields from a dataset and adds an `embedding` field.
++    - **Extraction Logic**: The service extracts text from `title`, `description`, and `keywords` dataset fields. For multilingual fields, it prioritizes languages in the order: `_lang` (original), `de`, `en`. For keywords, it collects all non-blank `label` values.
++
++### 2. Dataset Enrichment
++To enable semantic search, datasets must be enriched with vector embeddings during harvesting or via a reindexing process that needs to be triggered manually.
++
++- **Automatic Enrichment**: Integrated into `createOrUpdateDataset` and `createOrUpdateDatasetBulk` in `DatasetsServiceImpl.java`.
++- **Reindexing**: A dedicated method `triggerReindexingWithEmbeddings` allows for enriching all existing datasets in the Elasticsearch index.
++- **Fields**: The service currently targets the following fields to build the embedding context:
++    - `title`: Extracted using language priority (`_lang`, `de`, `en`).
++    - `description`: Extracted using language priority (`_lang`, `de`, `en`).
++    - `keywords`: Extracted from the `label` of each keyword entry.
++
++### 3. Hybrid Search
++Hybrid search combines the strengths of keyword matching and semantic cosinus-similarity.
++
++- **Implementation**: Located in `ElasticsearchSearchClientImpl.java` within the `search` method logic for datasets.
++- **Logic**: It executes a query in Elasticsearch that combines a standard full-text search query with a k-nearest neighbors (kNN) vector search query.
++- **Fields**: Semantic matching is performed on specific embedding fields (`title_embedding`, `description_embedding`, `keywords_embedding`) if available.
++- **Scoring**: The scores from both methods are combined. A `min_score` can be configured to filter out low-relevance semantic matches in method `buildHybridDatasetSearchRequest`.
++
++### 4. API Integration
++The semantic search functionality is exposed via the standard piveau-hub-search endpoint.
++
++- **Endpoint**: `/search` (e.g., `https://example.org/api/hub/search/search`)
++- **Parameter**: `semanticSearch` (boolean, default: true).
++  If enabled, the search service generates an embedding for the query string `q` and performs a hybrid search. If disabled, the search is performed as a standard full-text search.  Enabled by default to ensure backward compatibility with existing clients. 
++- **OpenAPI**: Updated and specified in `src/main/resources/webroot/openapi.yaml`.
++
++---
++
++## Configuration
++
++The following configurations were introduced or updated:
++
++- **Ollama Integration**: Managed via `docker-compose.yaml`. It spins up an Ollama container with the required model.
++- **Service Configuration**: `PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG` in `conf/config.sample.json` defines the endpoint and model for the Ollama embedding service.
++- **Log Level**: `PIVEAU_LOG_LEVEL` can be used to enable debug logging for the search components.
++
++---
++
++## Building and Running
++
++To build and run the `piveau-hub-search` service with semantic search capabilities, follow these steps:
++
++### 1. Start Prerequisites
++First, you need to start Elasticsearch and Ollama. This is typically done using Docker:
++
++```bash
++docker-compose up -d
++```
++
++This will start Elasticsearch (for storage and vector search) and Ollama (for embedding generation). Inject harvested datasets into Elasticsearch, e.g. by using the `piveau-hub-harvester` or restoring from a backup e.g. via tools like `elasticdump`.
++
++### 2. Build the Service
++Use Maven to compile and package the service into a runnable JAR file:
++
++```bash
++mvn clean package -DskipTests
++```
++
++### 3. Run the Service
++Once the JAR file is generated, you can start the service using:
++
++```bash
++PIVEAU_LOG_LEVEL=DEBUG OTEL_SDK_DISABLED=true java -jar target/search.jar
++```
++*Note: This will execute the JAR with the necessary environment variables (e.g., `PIVEAU_LOG_LEVEL=DEBUG`, `OTEL_SDK_DISABLED=true`).*
++
++---
++
++## File Changes Summary
++
++| File | Description                                                                    |
++| --- |--------------------------------------------------------------------------------|
++| `conf/elasticsearch/mapping/dataset/standard.json` | Updated Elasticsearch mapping to include the `embedding` field (dense_vector). |
++| `src/main/java/io/piveau/hub/search/MainVerticle.java` | Registration and initialization of the `EmbeddingService`.                     |
++| `src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java` | Implemented hybrid kNN + full-text query logic.                                |
++| `src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java` | Integrated enrichment logic and reindexing function.                           |
++| `src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingService.java` | Interface for the embedding service.                                           |
++| `src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceImpl.java` | Implementation of embedding generation and dataset enrichment.                 |
++| `src/main/java/io/piveau/hub/search/services/search/SearchServiceImpl.java` | Orchestrates query enrichment and search execution.                            |
++| `src/main/java/io/piveau/hub/search/util/request/QueryParams.java` | Added support for `queryVector` and `semanticSearch` flag.                     |
++| `src/main/resources/webroot/openapi.yaml` | Added `semanticSearch` parameter to the `/search` endpoint.                    |
++| `src/test/java/io/piveau/hub/search/services/datasets/DatasetsServiceTest.java` | Tests for embedding generation during reindexing and bulk indexing.            |
++| `src/test/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceTest.java` | Unit tests for embedding generation and dataset enrichment logic.              |
++| `src/test/java/io/piveau/hub/search/IntegrationTest/HybridDatasetSearchIntegrationTest.java` | Integration tests for the hybrid search functionality.                         |
++| `docker-compose.yaml` | Added Ollama service for local embedding generation.                           |
+diff --git a/conf/config.sample.json b/conf/config.sample.json
+index efd36ac9..43551cf9 100644
+--- a/conf/config.sample.json
++++ b/conf/config.sample.json
+@@ -478,5 +478,9 @@
+         ]
+       }
+     }
++  },
++  "PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG": {
++    "url": "http://localhost:11434",
++    "model": "paraphrase-multilingual"
+   }
+ }
+diff --git a/conf/elasticsearch/mapping/dataset/standard.json b/conf/elasticsearch/mapping/dataset/standard.json
+index 38ffd243..00535639 100644
+--- a/conf/elasticsearch/mapping/dataset/standard.json
++++ b/conf/elasticsearch/mapping/dataset/standard.json
+@@ -5536,6 +5536,24 @@
+     "was_generated_by": {
+       "type": "keyword",
+       "ignore_above": 8191
++    },
++    "title_embedding": {
++      "type": "dense_vector",
++      "dims": 768,
++      "index": true,
++      "similarity": "cosine"
++    },
++    "description_embedding": {
++      "type": "dense_vector",
++      "dims": 768,
++      "index": true,
++      "similarity": "cosine"
++    },
++    "keywords_embedding": {
++      "type": "dense_vector",
++      "dims": 768,
++      "index": true,
++      "similarity": "cosine"
+     }
+   }
+ }
+diff --git a/docker-compose.yaml b/docker-compose.yaml
+index cad08c02..f28a4e9f 100644
+--- a/docker-compose.yaml
++++ b/docker-compose.yaml
+@@ -19,3 +19,26 @@ services:
+     ports:
+       - 9200:9200
+       - 9300:9300
++  ollama:
++    image: ollama/ollama:latest
++    container_name: ollama
++    logging:
++      options:
++        max-size: "50m"
++    ports:
++      - 11434:11434
++    volumes:
++      - ollama:/root/.ollama
++    environment:
++      - OLLAMA_KEEP_ALIVE=24h
++    entrypoint: ["/bin/sh", "-c"]
++    command:
++      - |
++        ollama serve &
++        until ollama list >/dev/null 2>&1; do sleep 1; done
++        ollama pull paraphrase-multilingual
++        wait
++    restart: unless-stopped
++
++volumes:
++  ollama:
+\ No newline at end of file
+diff --git a/pom.xml b/pom.xml
+index bf2240aa..06388e52 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -10,13 +10,14 @@
+     <name>piveau-hub-search</name>
+ 
+     <properties>
+-        <vertx.version>4.5.22</vertx.version>
+-        <vertx.launcher>io.piveau.vertx.PiveauVertxLauncherKt</vertx.launcher>
+-        <vertx.verticle>io.piveau.hub.search.MainVerticle</vertx.verticle>
++        <elasticsearch.version>8.17.10</elasticsearch.version>
+         <maven.compiler.release>21</maven.compiler.release>
+-        <updateParent>true</updateParent>
+         <parentName>piveau-hub-search</parentName>
+         <parentVersion>0</parentVersion>
++        <updateParent>true</updateParent>
++        <vertx.version>4.5.22</vertx.version>
++        <vertx.launcher>io.piveau.vertx.PiveauVertxLauncherKt</vertx.launcher>
++        <vertx.verticle>io.piveau.hub.search.MainVerticle</vertx.verticle>
+     </properties>
+ 
+     <scm>
+@@ -57,6 +58,17 @@
+     </dependencyManagement>
+ 
+     <dependencies>
++        <!-- Fix für Netty-DNS-Warnung auf macOS (wird für korrektes DNS unter macOS von vert.x genutzt) -->
++        <dependency>
++            <groupId>io.netty</groupId>
++            <artifactId>netty-resolver-dns-native-macos</artifactId>
++            <classifier>osx-x86_64</classifier>
++        </dependency>
++        <dependency>
++            <groupId>io.netty</groupId>
++            <artifactId>netty-resolver-dns-native-macos</artifactId>
++            <classifier>osx-aarch_64</classifier>
++        </dependency>
+         <dependency>
+             <groupId>io.vertx</groupId>
+             <artifactId>vertx-core</artifactId>
+@@ -154,17 +166,17 @@
+         <dependency>
+             <groupId>co.elastic.clients</groupId>
+             <artifactId>elasticsearch-java</artifactId>
+-            <version>8.18.3</version>
++            <version>${elasticsearch.version}</version>
+         </dependency>
+         <dependency>
+             <groupId>com.fasterxml.jackson.core</groupId>
+             <artifactId>jackson-core</artifactId>
+-            <version>2.18.2</version>
++            <version>2.17.0</version>
+         </dependency>
+         <dependency>
+             <groupId>com.fasterxml.jackson.core</groupId>
+             <artifactId>jackson-databind</artifactId>
+-            <version>2.18.2</version>
++            <version>2.17.0</version>
+         </dependency>
+         <dependency>
+             <groupId>org.apache.logging.log4j</groupId>
+@@ -213,7 +225,6 @@
+             <artifactId>Saxon-HE</artifactId>
+             <version>12.8</version>
+         </dependency>
+-
+         <dependency>
+             <groupId>org.testcontainers</groupId>
+             <artifactId>testcontainers</artifactId>
+@@ -249,8 +260,6 @@
+             <version>4.0.2</version>
+             <scope>test</scope>
+         </dependency>
+-
+-
+     </dependencies>
+ 
+     <build>
+diff --git a/src/main/java/io/piveau/hub/search/Constants.java b/src/main/java/io/piveau/hub/search/Constants.java
+index 6623042e..34356638 100644
+--- a/src/main/java/io/piveau/hub/search/Constants.java
++++ b/src/main/java/io/piveau/hub/search/Constants.java
+@@ -13,6 +13,7 @@ public final class Constants {
+     public static final String ENV_PIVEAU_HUB_SEARCH_SITEMAP_CONFIG = "PIVEAU_HUB_SEARCH_SITEMAP_CONFIG";
+     public static final String ENV_PIVEAU_HUB_SEARCH_GAZETTEER_CONFIG = "PIVEAU_HUB_SEARCH_GAZETTEER_CONFIG";
+     public static final String ENV_PIVEAU_HUB_SEARCH_FEED_CONFIG = "PIVEAU_HUB_SEARCH_FEED_CONFIG";
++    public static final String ENV_PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG = "PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG";
+     public static final String ENV_PIVEAU_HUB_SEARCH_HTTP_BODY_LIMIT = "PIVEAU_HUB_SEARCH_HTTP_BODY_LIMIT";
+     public static final String ENV_PIVEAU_HUB_AUTHORIZATION_PROCESS_DATA = "PIVEAU_HUB_AUTHORIZATION_PROCESS_DATA";
+     public static final String ENV_PIVEAU_FEATURE_FLAGS = "PIVEAU_FEATURE_FLAGS";
+@@ -66,4 +67,8 @@ public final class Constants {
+ 
+     public static final String FEATURE_FLAG_RBAC_SECURITY = "rbac_security";
+     public static final String FEATURE_FLAG_PIVEAU_PROFILE = "piveau_profile";
++
++    public static final String FIELD_TITLE_EMBEDDING = "title_embedding";
++    public static final String FIELD_DESCRIPTION_EMBEDDING = "description_embedding";
++    public static final String FIELD_KEYWORDS_EMBEDDING = "keywords_embedding";
+ }
+diff --git a/src/main/java/io/piveau/hub/search/MainVerticle.java b/src/main/java/io/piveau/hub/search/MainVerticle.java
+index 0b4a7409..d65d5783 100644
+--- a/src/main/java/io/piveau/hub/search/MainVerticle.java
++++ b/src/main/java/io/piveau/hub/search/MainVerticle.java
+@@ -9,6 +9,7 @@ import io.piveau.hub.search.services.dataservices.DataServicesService;
+ import io.piveau.hub.search.services.dataservices.DataServicesServiceVerticle;
+ import io.piveau.hub.search.services.datasets.DatasetsService;
+ import io.piveau.hub.search.services.datasets.DatasetsServiceVerticle;
++import io.piveau.hub.search.services.embeddings.EmbeddingService;
+ import io.piveau.hub.search.services.gazetteer.GazetteerService;
+ import io.piveau.hub.search.services.gazetteer.GazetteerServiceVerticle;
+ import io.piveau.hub.search.services.resources.ResourcesService;
+@@ -48,6 +49,7 @@ import io.vertx.ext.web.handler.*;
+ import io.vertx.ext.web.openapi.RouterBuilder;
+ import io.vertx.ext.web.validation.BodyProcessorException;
+ import io.vertx.micrometer.PrometheusScrapingHandler;
++import io.vertx.serviceproxy.ServiceBinder;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
+@@ -86,6 +88,7 @@ public class MainVerticle extends AbstractVerticle {
+         loadConfig()
+                 .compose(this::initIndexManager)
+                 .compose(this::initPiveauAuth)
++                .compose(this::initEmbeddingService)
+                 .compose(this::bootstrapVerticles)
+                 .compose(this::startServer)
+                 .onSuccess(v -> LOG.info("Successfully launched hub-search"))
+@@ -399,6 +402,7 @@ public class MainVerticle extends AbstractVerticle {
+                         .add(Constants.ENV_PIVEAU_HUB_SEARCH_SERVICE_PORT)
+                         .add(Constants.ENV_PIVEAU_HUB_SEARCH_API_KEY)
+                         .add(Constants.ENV_PIVEAU_HUB_SEARCH_ES_CONFIG)
++                        .add(Constants.ENV_PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG)
+                         .add(Constants.ENV_PIVEAU_HUB_SEARCH_CLI_CONFIG)
+                         .add(Constants.ENV_PIVEAU_HUB_SEARCH_GAZETTEER_CONFIG)
+                         .add(Constants.ENV_PIVEAU_HUB_SEARCH_SITEMAP_CONFIG)
+@@ -458,6 +462,23 @@ public class MainVerticle extends AbstractVerticle {
+         return promise.future();
+     }
+ 
++    /**
++     * Initializes the embedding service and registers it with the service binder.
++     *
++     * @param config the configuration object containing the settings required to initialize the embedding service
++     * @return a Future representing the asynchronous completion of the initialization, containing the provided configuration object upon success
++     */
++    private Future<JsonObject> initEmbeddingService(JsonObject config) {
++        return EmbeddingService.create(vertx, config)
++            .map(embeddingService -> {
++                new ServiceBinder(vertx)
++                    .setAddress(EmbeddingService.SERVICE_ADDRESS)
++                    .register(EmbeddingService.class, embeddingService);
++                LOG.info("Embedding service registered at {}", EmbeddingService.SERVICE_ADDRESS);
++                return config;
++            });
++    }
++
+     private Future<JsonObject> bootstrapVerticles(JsonObject config) {
+ 
+         DeploymentOptions deploymentOptions = new DeploymentOptions()
+diff --git a/src/main/java/io/piveau/hub/search/engine/SearchClient.java b/src/main/java/io/piveau/hub/search/engine/SearchClient.java
+index 9c5cbb2d..f9778ec8 100644
+--- a/src/main/java/io/piveau/hub/search/engine/SearchClient.java
++++ b/src/main/java/io/piveau/hub/search/engine/SearchClient.java
+@@ -44,6 +44,7 @@ public interface SearchClient {
+     Future<String> postDocument(String docType, JsonObject document);
+     //
+     Future<Integer> putDocument(String docType, String documentId, JsonObject document, Boolean refresh);
++    Future<Integer> putDocument(String docType, String documentId, JsonObject document, String index, Boolean refresh);
+     Future<Integer> putDocument(String docType, String documentId, JsonObject document);
+     //
+     Future<Void> updateDocument(String docType, String documentId, JsonObject document, Boolean refresh);
+@@ -104,5 +105,4 @@ public interface SearchClient {
+ 
+     // Misc
+     Future<Void> paginate(QueryParams query, Handler<ResponseBody<JsonData>> handler);
+-
+ }
+diff --git a/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java b/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java
+index 592b1043..c632ea59 100644
+--- a/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java
++++ b/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java
+@@ -15,8 +15,8 @@ import co.elastic.clients.elasticsearch.core.search.TotalHits;
+ import co.elastic.clients.elasticsearch.ilm.PutLifecycleRequest;
+ import co.elastic.clients.elasticsearch.indices.*;
+ import co.elastic.clients.elasticsearch.indices.ExistsRequest;
+-import co.elastic.clients.elasticsearch.indices.migrate_reindex.ModeEnum;
+-import co.elastic.clients.elasticsearch.indices.migrate_reindex.SourceIndex;
++// import co.elastic.clients.elasticsearch.indices.migrate_reindex.ModeEnum;
++// import co.elastic.clients.elasticsearch.indices.migrate_reindex.SourceIndex;
+ import co.elastic.clients.elasticsearch.indices.put_index_template.IndexTemplateMapping;
+ import co.elastic.clients.elasticsearch.indices.update_aliases.Action;
+ import co.elastic.clients.elasticsearch.indices.update_aliases.AddAction;
+@@ -179,6 +179,11 @@ public class ElasticsearchSearchClientImpl implements SearchClient {
+ 
+     @Override
+     public Future<Integer> putDocument(String docType, String documentId, JsonObject document, Boolean refresh) {
++        return putDocument(docType, documentId, document, Constants.getWriteAlias(docType), refresh);
++    }
++
++    @Override
++    public Future<Integer> putDocument(String docType, String documentId, JsonObject document, String index, Boolean refresh) {
+         document.put("id", documentId);
+         String indexId = indexManager.getIndexId(docType, documentId);
+ 
+@@ -186,8 +191,10 @@ public class ElasticsearchSearchClientImpl implements SearchClient {
+             processPayloadLanguageFields(document);
+         }
+ 
++        // log.trace("putDocument [{}]: docType={}, index={}", documentId, docType, index);
++
+         IndexRequest<JsonData> indexRequest = IndexRequest.of(builder -> builder
+-                .index(Constants.getWriteAlias(docType))
++                .index(index)
+                 .refresh(refresh == Boolean.TRUE ? Refresh.True : Refresh.False)
+                 .id(indexId)
+                 .document(JsonData.fromJson(document.encode())));
+@@ -634,15 +641,175 @@ public class ElasticsearchSearchClientImpl implements SearchClient {
+                 });
+     }
+ 
++
++    /**
++     * Determines if the given query parameters require a dataset search that combines semantic and full text search.
++     * Such a hybrid dataset search is identified by the following conditions:
++     * - the query is a semantic search
++     * - the query string (`q`) is not null or empty
++     * - the query contains a query vector
++     * - the query includes filters
++     * - the filters focus on the dataset document type
++     *
++     * @param query The {@link QueryParams} object containing the query parameters for the search.
++     * @return {@code true} if the query meets the criteria for a hybrid dataset search; {@code false} otherwise.
++     */
++    private boolean isHybridDatasetSearch(QueryParams query) {
++        return query.isSemanticSearch()
++            && !Helper.isNullOrEmpty(query.getQ())
++            && !Helper.isNullOrEmpty(query.getQueryVector())
++            && !Helper.isNullOrEmpty(query.getFilters())
++            && query.getFilters().contains(Constants.DOC_TYPE_DATASET);
++    }
++
++
++    /**
++     * Constructs a query to check if at least one of the required embedding fields for either "title", "description"
++     * or "keywords" exists in the documents.
++     *
++     * @return A {@link Query} object configured to check for the existence of any one of the specified embedding fields.
++     */
++    private Query embeddingExistsQuery() {
++        return BoolQuery.of(bool -> bool
++            .should(ExistsQuery.of(exists -> exists.field("title_embedding"))._toQuery())
++            .should(ExistsQuery.of(exists -> exists.field("description_embedding"))._toQuery())
++            .should(ExistsQuery.of(exists -> exists.field("keywords_embedding"))._toQuery())
++            .minimumShouldMatch("1")
++        )._toQuery();
++    }
++
+     @Override
+     public Future<SearchResponse<JsonData>> search(QueryParams query, HeaderParams header) {
+-        SearchRequest searchRequest = Helper.isNullOrEmpty(query.getFilters()) ?
++        SearchRequest searchRequest;
++
++        if (isHybridDatasetSearch(query)) {
++            searchRequest = buildHybridDatasetSearchRequest(query, header);
++        } else {
++            searchRequest = Helper.isNullOrEmpty(query.getFilters()) ?
+                 SearchRequestBuilder.buildSearchRequest(query, header, operator) :
+                 SearchRequestBuilder.buildSearchRequest(query, header, indexManager, operator);
++        }
+ 
+         return client.search(searchRequest);
+     }
+ 
++    private SearchRequest buildHybridDatasetSearchRequest(QueryParams query, HeaderParams header) {
++
++        // return SearchRequestBuilder.buildSearchRequest(query, header, operator);
++
++        List<String> indices = query.getFilters().stream().map(Constants::getReadAlias).toList();
++
++        // Query No. 1: Embedding-based search with semantic boosting
++
++        float semanticBoost = 1.2f;
++        float semanticMinScore = 0.75f;
++        float effectiveSemanticMinScore = semanticMinScore * semanticBoost;
++
++        Map<String, JsonData> scriptParams = new HashMap<>();
++        scriptParams.put("queryVector", JsonData.of(query.getQueryVector()));
++        scriptParams.put("title_weight", JsonData.of(0.5f));
++        scriptParams.put("description_weight", JsonData.of(0.3f));
++        scriptParams.put("keywords_weight", JsonData.of(0.2f));
++        scriptParams.put("semantic_boost", JsonData.of(semanticBoost));
++        scriptParams.put("semantic_min_score", JsonData.of(semanticMinScore));
++
++        Query semanticQuery = ScriptScoreQuery.of(scriptScore -> scriptScore
++            .query(embeddingExistsQuery())
++            .minScore(effectiveSemanticMinScore)
++            .script(script -> script
++                .lang("painless") // allow only sandboxed and secure script operations
++                .params(scriptParams)
++                .source("""
++                    double weighted_score = 0.0;
++                    double weight_sum = 0.0;
++                    
++                    if (doc['title_embedding'].size() > 0) {
++                        double score = (cosineSimilarity(params.queryVector, 'title_embedding') + 1.0) / 2.0;
++                        weighted_score += score * params.title_weight;
++                        weight_sum += params.title_weight;
++                    }
++
++                    if (doc['description_embedding'].size() > 0) {
++                        double score = (cosineSimilarity(params.queryVector, 'description_embedding') + 1.0) / 2.0;
++                        weighted_score += score * params.description_weight;
++                        weight_sum += params.description_weight;
++                    }
++
++                    if (doc['keywords_embedding'].size() > 0) {
++                        double score = (cosineSimilarity(params.queryVector, 'keywords_embedding') + 1.0) / 2.0;
++                        weighted_score += score * params.keywords_weight;
++                        weight_sum += params.keywords_weight;
++                    }
++                    
++                    double semantic_score = weight_sum > 0 ? weighted_score / weight_sum : 0.0;
++                    
++                    if (semantic_score < params.semantic_min_score) {
++                        return 0.0;
++                    }
++                    
++                    return semantic_score * params.semantic_boost;
++                    """)
++            )
++        )._toQuery();
++
++        // Query No. 2: Full-text search with title, description, and keywords boosting
++
++        Query lexicalQuery = BoolQuery.of( bool -> bool
++            .should(MultiMatchQuery.of(multiMatch -> multiMatch
++                .query(query.getQ())
++                .fields("title._lang^4", "description._lang^1.2", "keywords.id^3")
++                .type(TextQueryType.BestFields)
++                .operator(operator)
++                .boost(0.8f)
++            )._toQuery())
++            .should(MultiMatchQuery.of(multiMatch -> multiMatch
++                .query(query.getQ())
++                .fields("title._lang^6", "keywords.id^4")
++                .type(TextQueryType.Phrase)
++                .boost(1.5f)
++            )._toQuery())
++            .should(MultiMatchQuery.of(multiMatch -> multiMatch
++                .query(query.getQ())
++                .fields("title._lang^2", "description._lang", "keywords.id^2")
++                .fuzziness("AUTO")
++                .prefixLength(2)
++                .boost(0.3f)
++            )._toQuery())
++            .minimumShouldMatch("1")
++        )._toQuery();
++
++        // Combine the two queries into one hybrid query
++
++        Query hybridQuery = BoolQuery.of(bool -> bool
++            .should(semanticQuery)
++            .should(lexicalQuery)
++            .minimumShouldMatch("1")
++        )._toQuery();
++
++        SearchRequest.Builder builder = new SearchRequest.Builder()
++            .index(indices)
++            .from(query.getFrom())
++            .size(query.getSize())
++            .query(hybridQuery)
++            .trackTotalHits(t -> t.enabled(true)); // count total hits, even if larger than search limit
++
++        // Filter source-fields as requested
++
++        if(!Helper.isNullOrEmpty(query.getIncludes())) {
++            builder.source(source -> source
++                .filter(filter -> filter
++                    .includes(query.getIncludes()) ));
++        }
++
++        // Filter explanation of score computation
++
++        if(query.isShowScore()) {
++            builder.explain(false);
++        }
++
++        return builder.build();
++    }
++
+     @Override
+     public Future<SearchResponse<JsonData>> searchAggregation(QueryParams query, HeaderParams header, String index) {
+         if (query.isAggregation()) {
+@@ -1000,20 +1167,22 @@ public class ElasticsearchSearchClientImpl implements SearchClient {
+ 
+     @Override
+     public Future<Void> paginate(QueryParams query, Handler<ResponseBody<JsonData>> handler) {
+-        SearchRequest searchRequest = SearchRequest.of(builder ->
+-                        builder
+-                                .index(query.getFilters().stream()
+-                                        .map(Constants::getReadAlias)
+-                                        .toList())
+-                                .size(query.getSize())
+-                                .scroll(Time.of(t -> t.time("300s")))
+-//                                .source(sb -> sb.filter(f -> f.includes(query.getIncludes())))
+-                                .source(sb -> sb.fetch(false))
+-//                                .storedFields(query.getFields())
+-                                .fields(query.getFields().stream()
+-                                        .map(field -> FieldAndFormat.of(b -> b.field(field)))
+-                                        .toList())
+-        );
++        SearchRequest searchRequest = SearchRequest.of(builder -> {
++            builder
++                .index(query.getFilters().stream()
++                    .map(Constants::getReadAlias)
++                    .toList())
++                .size(query.getSize())
++                .scroll(Time.of(t -> t.time("300s")));
++                // .source(sb -> sb.fetch(false));  // TODO: Check if enabling source-loading hits performance significantly.
++
++            if (query.getFields() != null && ! query.getFields().isEmpty()) {
++                builder.fields(query.getFields().stream()
++                    .map(field -> FieldAndFormat.of(b -> b.field(field)))
++                    .toList());
++            }
++            return builder;
++        });
+         return client.search(searchRequest)
+                 .compose(response -> {
+                     handler.handle(response);
+diff --git a/src/main/java/io/piveau/hub/search/engine/impl/opensearch/OpenSearchSearchClientImpl.java b/src/main/java/io/piveau/hub/search/engine/impl/opensearch/OpenSearchSearchClientImpl.java
+index b1df90c5..346be2c5 100644
+--- a/src/main/java/io/piveau/hub/search/engine/impl/opensearch/OpenSearchSearchClientImpl.java
++++ b/src/main/java/io/piveau/hub/search/engine/impl/opensearch/OpenSearchSearchClientImpl.java
+@@ -39,6 +39,11 @@ public class OpenSearchSearchClientImpl implements SearchClient {
+         return null;
+     }
+ 
++    @Override
++    public Future<Integer> putDocument(String type, String documentId, JsonObject payload, String index, Boolean refresh) {
++        return null;
++    }
++
+     @Override
+     public Future<Void> updateDocument(String type, String documentId, JsonObject payload) {
+         return null;
+@@ -218,5 +223,4 @@ public class OpenSearchSearchClientImpl implements SearchClient {
+     public Future<Void> paginate(QueryParams query, Handler<ResponseBody<JsonData>> handler) {
+         return Future.failedFuture(new IllegalStateException("Not yet implemented"));
+     }
+-
+ }
+diff --git a/src/main/java/io/piveau/hub/search/services/datasets/DatasetsService.java b/src/main/java/io/piveau/hub/search/services/datasets/DatasetsService.java
+index e6d1ad83..e09d1a26 100644
+--- a/src/main/java/io/piveau/hub/search/services/datasets/DatasetsService.java
++++ b/src/main/java/io/piveau/hub/search/services/datasets/DatasetsService.java
+@@ -36,4 +36,5 @@ public interface DatasetsService {
+     Future<Void> deleteDatasetRevision(String revisionId);
+     Future<String> triggerSyncScores();
+ 
++    Future<Void> triggerReindexingWithEmbeddings();
+ }
+diff --git a/src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java b/src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java
+index d0f4f6d2..ddeb2d30 100644
+--- a/src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java
++++ b/src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java
+@@ -4,6 +4,7 @@ import co.elastic.clients.json.JsonData;
+ import io.piveau.hub.search.Constants;
+ import io.piveau.hub.search.engine.SearchClient;
+ import io.piveau.hub.search.services.catalogues.CataloguesService;
++import io.piveau.hub.search.services.embeddings.EmbeddingService;
+ import io.piveau.hub.search.services.search.SearchService;
+ import io.piveau.hub.search.services.vocabulary.VocabularyService;
+ import io.piveau.hub.search.util.date.DateChecker;
+@@ -40,6 +41,7 @@ public class DatasetsServiceImpl implements DatasetsService {
+     private final SearchService searchService;
+     private final CataloguesService cataloguesService;
+     private final VocabularyService vocabularyService;
++    private final EmbeddingService embeddingService;
+ 
+     private final HVDSetter hvdSetter;
+     private final PiveauContext serviceContext;
+@@ -53,6 +55,7 @@ public class DatasetsServiceImpl implements DatasetsService {
+         this.searchService = SearchService.createProxy(vertx, SearchService.SERVICE_ADDRESS);
+         this.cataloguesService = CataloguesService.createProxy(vertx, CataloguesService.SERVICE_ADDRESS);
+         this.vocabularyService = VocabularyService.createProxy(vertx, VocabularyService.SERVICE_ADDRESS);
++        this.embeddingService = EmbeddingService.createProxy(vertx, EmbeddingService.SERVICE_ADDRESS);
+ 
+         this.serviceContext = new PiveauContext("hub.search", "DatasetsService");
+     }
+@@ -103,6 +106,7 @@ public class DatasetsServiceImpl implements DatasetsService {
+ 
+         return cataloguesService.resolveCatalogueInPayload(Constants.DOC_TYPE_DATASET, payload)
+                 .compose(vocabularyService::replaceVocabularyInPayload)
++                .compose(embeddingService::enrichDatasetWithEmbeddings)  // Compute and add word-embeddings
+                 .compose(document -> searchClient.postDocument(Constants.DOC_TYPE_DATASET, document))
+                 .onSuccess(result -> resourceContext.log().debug("Post success: " + result))
+                 .map(result -> ReturnHelper.returnSuccess(201, new JsonObject().put("id", result)));
+@@ -117,6 +121,8 @@ public class DatasetsServiceImpl implements DatasetsService {
+ 
+         return cataloguesService.resolveCatalogueInPayload(Constants.DOC_TYPE_DATASET, payload)
+                 .compose(vocabularyService::replaceVocabularyInPayload)
++                // Compute and enrich dataset with word-embeddings
++                .compose(embeddingService::enrichDatasetWithEmbeddings)
+                 // Get old dataset (or empty if not found) and merge quality_meas
+                 .compose(replaceVocabularyResult -> searchClient.getDocument(Constants.DOC_TYPE_DATASET,
+                                 Constants.getReadAlias(Constants.DOC_TYPE_DATASET), datasetId)
+@@ -173,6 +179,7 @@ public class DatasetsServiceImpl implements DatasetsService {
+                     }
+                 })
+                 .compose(vocabularyService::replaceVocabularyInPayload)
++                .compose(embeddingService::enrichDatasetWithEmbeddings)
+                 .compose(result -> {
+                     content.set(result);
+                     return searchClient.getDocument(Constants.DOC_TYPE_DATASET,
+@@ -244,6 +251,19 @@ public class DatasetsServiceImpl implements DatasetsService {
+ 
+         return cataloguesService.resolveCatalogueInPayloadArray(Constants.DOC_TYPE_DATASET, payload)
+                 .compose(vocabularyService::replaceVocabularyInPayloadList)
++                .compose(list -> {
++                    List<Future<JsonObject>> futures = new ArrayList<>();
++                    for (int i = 0; i < list.size(); i++) {
++                        futures.add(embeddingService.enrichDatasetWithEmbeddings(list.getJsonObject(i)));
++                    }
++                    return Future.all(futures).map(compositeFuture -> {
++                        JsonArray enrichedArray = new JsonArray();
++                        for (int i = 0; i < list.size(); i++) {
++                            enrichedArray.add(compositeFuture.<JsonObject>resultAt(i));
++                        }
++                        return enrichedArray;
++                    });
++                })
+                 .compose(content -> searchClient.putDocumentsBulk(
+                         Constants.DOC_TYPE_DATASET,
+                         "dataset-revisions",
+@@ -493,4 +513,60 @@ public class DatasetsServiceImpl implements DatasetsService {
+         return Future.succeededFuture(JsonData.of(revision));
+     }
+ 
++    @Override
++    public Future<Void> triggerReindexingWithEmbeddings() {
++
++        log.info("Starting reindexing embeddings for all datasets.");
++
++        QueryParams query = new QueryParams();
++        query.setFilters(List.of(Constants.DOC_TYPE_DATASET));
++        query.setAggregation(false);
++        query.setSize(10000);
++        query.setScroll(true);
++
++        HeaderParams header = new HeaderParams();
++
++        return searchClient.listIds(query, header, false, true)
++            .compose(ids -> {
++
++                Future<Void> chain = Future.succeededFuture();
++                final int numberOfDocuments = ids.size();
++
++                log.info("Reindexing: {} datasets found, start enriching datasets with embeddings", numberOfDocuments);
++
++                for (int i = 0; i < numberOfDocuments; i++) {
++                    final String id = ids.getString(i);
++                    final int index = i;
++
++                    chain = chain.compose(v ->
++                        searchClient.getDocument(Constants.DOC_TYPE_DATASET, Constants.getReadAlias(Constants.DOC_TYPE_DATASET), id)
++                            .compose(doc -> {
++                                if (doc == null) {
++                                    log.error("Reindexing [{}]: skipping iffy null-document", id);
++                                    return Future.<Void>succeededFuture();
++                                }
++
++                                return embeddingService.enrichDatasetWithEmbeddings(doc)
++                                    .compose(enriched -> {
++                                        String writeAlias = Constants.getWriteAlias(Constants.DOC_TYPE_DATASET);
++                                        return searchClient.putDocument(Constants.DOC_TYPE_DATASET, id, enriched, writeAlias, true)
++                                            .onSuccess(res -> log.info("Reindexing {}/{} [{}]: putDocument to {} successful (result={})", index, numberOfDocuments, id, writeAlias, res))
++                                            .onFailure(err -> log.error("Reindexing [{}]: putDocument failed with error: {}", id, err.getMessage()));
++                                    })
++                                    .mapEmpty();
++                            })
++                            .recover(err -> {
++                                log.error("Reindexing [{}]: failed with error: {}", id, err.getMessage());
++                                return Future.<Void>succeededFuture();
++                            })
++                    );
++                }
++
++                return chain;
++            })
++            .onSuccess(v -> log.info("Reindexing all datasets with embeddings completed successfully"))
++            .onFailure(err -> log.error("Reindexing all datasets with embeddings failed", err))
++            .mapEmpty();
++    }
++
+ }
+diff --git a/src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingService.java b/src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingService.java
+new file mode 100644
+index 00000000..8d78f751
+--- /dev/null
++++ b/src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingService.java
+@@ -0,0 +1,24 @@
++package io.piveau.hub.search.services.embeddings;
++
++import io.vertx.codegen.annotations.ProxyGen;
++import io.vertx.core.Future;
++import io.vertx.core.json.JsonArray;
++import io.vertx.core.json.JsonObject;
++import io.vertx.core.Vertx;
++
++@ProxyGen
++public interface EmbeddingService {
++
++  String SERVICE_ADDRESS = "io.piveau.hub.search.services.embeddings.queue";
++
++  static Future<EmbeddingService> create(Vertx vertx, JsonObject config) {
++    return Future.succeededFuture(new EmbeddingServiceImpl(vertx, config));
++  }
++
++  static EmbeddingService createProxy(Vertx vertx, String address) {
++    return new EmbeddingServiceVertxEBProxy(vertx, address);
++  }
++
++  Future<JsonArray> generateEmbedding(String text);
++  Future<JsonObject> enrichDatasetWithEmbeddings(JsonObject dataset);
++}
+diff --git a/src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceImpl.java b/src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceImpl.java
+new file mode 100644
+index 00000000..f6abb361
+--- /dev/null
++++ b/src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceImpl.java
+@@ -0,0 +1,170 @@
++package io.piveau.hub.search.services.embeddings;
++
++import io.piveau.hub.search.Constants;
++import io.piveau.json.ConfigHelper;
++import io.vertx.core.Future;
++import io.vertx.core.Vertx;
++import io.vertx.core.json.JsonArray;
++import io.vertx.core.json.JsonObject;
++import io.vertx.ext.web.client.WebClient;
++import io.vertx.ext.web.client.predicate.ResponsePredicate;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++public class EmbeddingServiceImpl implements EmbeddingService {
++
++  private final Logger log = LoggerFactory.getLogger(getClass());
++  private final WebClient webClient;
++  private final String ollamaUrl;
++  private final String model;
++
++  EmbeddingServiceImpl(Vertx vertx, JsonObject config) {
++    this.webClient = WebClient.create(vertx);
++
++    // Konfiguration für Ollama-Endpunkt und Modelnamen einlesen
++    JsonObject embeddingConfig = ConfigHelper.forConfig(config).forceJsonObject(Constants.ENV_PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG);
++    this.ollamaUrl = embeddingConfig.getString("url");
++    this.model = embeddingConfig.getString("model");
++  }
++
++  @Override
++  @SuppressWarnings("deprecation")
++  public Future<JsonArray> generateEmbedding(String text) {
++    // Doku für Ollama-Embedding-Endpunkt: https://docs.ollama.com/capabilities/embeddings
++
++    // Für einen leeren Eingabetext gibt Ollama kein Embedding zurück.
++    if (text == null || text.isBlank()) {
++      return Future.succeededFuture(new JsonArray());
++    }
++
++    JsonObject request = new JsonObject()
++        .put("model", model)
++        .put("input", text);
++
++    // TODO: Implementiere Post-Sanity-Check via HttpResponseExpectation
++    // https://vertx.io/blog/http-response-validation-with-the-vert-x-web-client/
++
++    return webClient.postAbs(ollamaUrl + "/api/embed")
++        .putHeader("Content-Type", "application/json")
++        .expect(ResponsePredicate.SC_OK)
++        .sendJsonObject(request)
++        .map(response -> response.bodyAsJsonObject().getJsonArray("embeddings").getJsonArray(0))
++        .onSuccess(response -> {})
++        .onFailure(err -> log.error("Error generating embedding: " + err.getMessage()));
++  }
++
++  @Override
++  public Future<JsonObject> enrichDatasetWithEmbeddings(JsonObject dataset) {
++
++    JsonObject enrichedDataset = dataset.copy();
++
++    // Make sure that no old embeeddings are left
++    enrichedDataset.remove(Constants.FIELD_TITLE_EMBEDDING);
++    enrichedDataset.remove(Constants.FIELD_DESCRIPTION_EMBEDDING);
++    enrichedDataset.remove(Constants.FIELD_KEYWORDS_EMBEDDING);
++
++    // Extract dataset metadata
++    String title = extractTitle(dataset);
++    String description = extractDescription(dataset);
++    String[] keywords = extractKeywords(dataset);
++    String joinedKeywords = String.join(", ", keywords);
++
++    // Create embedding futures for concurrent embedding generation
++    Future<JsonArray> titleFuture = generateEmbedding(title);
++    Future<JsonArray> descriptionFuture = generateEmbedding(description);
++    Future<JsonArray> keywordsFuture = generateEmbedding(joinedKeywords);
++
++    return Future.all(titleFuture, descriptionFuture, keywordsFuture)
++        .map(composite -> {
++
++          // Add embeddings to dataset metadata
++          JsonArray titleEmbedding = titleFuture.result();
++          if (titleEmbedding != null && !titleEmbedding.isEmpty()) {
++            enrichedDataset.put(Constants.FIELD_TITLE_EMBEDDING, titleEmbedding);
++          }
++
++          JsonArray descriptionEmbedding = descriptionFuture.result();
++          if (descriptionEmbedding != null && !descriptionEmbedding.isEmpty()) {
++            enrichedDataset.put(Constants.FIELD_DESCRIPTION_EMBEDDING, descriptionEmbedding);
++          }
++
++          JsonArray keywordsEmbedding = keywordsFuture.result();
++          if (keywordsEmbedding != null && !keywordsEmbedding.isEmpty()) {
++            enrichedDataset.put(Constants.FIELD_KEYWORDS_EMBEDDING, keywordsEmbedding);
++          }
++
++          return enrichedDataset;
++        })
++        .onFailure(err -> log.error("Error enriching dataset with embeddings: {}", err.getMessage()));
++  }
++
++  /**
++   * Extracts the title from the provided DCAT-AP dataset object. The method prioritizes the title
++   * in the following order: "_lang", "de", "en". If no title is found, it returns null.
++   *
++   * @param dataset the JsonObject representing the DCAT-AP dataset from which the title is extracted
++   * @return the extracted title as a String if found, otherwise null
++   */
++  private String extractTitle(JsonObject dataset) {
++    JsonObject titleObject = dataset.getJsonObject("title");
++    return extractPreferredLanguageString(titleObject);
++  }
++
++  /**
++   * Extracts the description from the provided DCAT-AP dataset object. The method prioritizes the description
++   * in the following order: "_lang", "de", "en". If no description is found, it returns null.
++   *
++   * @param dataset the JsonObject representing the DCAT-AP dataset from which the description text is extracted
++   * @return the extracted description as a String if found, otherwise null
++   */
++  private String extractDescription(JsonObject dataset) {
++    JsonObject descriptionObject = dataset.getJsonObject("description");
++    return extractPreferredLanguageString(descriptionObject);
++  }
++
++  /**
++   * Extracts a non-blank string from the provided JsonObject based on a predefined language priority.
++   * The method searches for keys in the following order: "_lang", "de", "en". If a non-blank string is
++   * found for one of these keys, it is returned. If no valid string is found or if the JsonObject is null,
++   * the method returns null.
++   *
++   * @param multilingualObject the JsonObject containing potential string values for different language keys as found in many DCAT-AP datasets fields
++   * @return the extracted non-blank string based on the language priority, or null if no valid string is found
++   */
++  private String extractPreferredLanguageString(JsonObject multilingualObject) {
++    if (multilingualObject == null) {
++      return null;
++    }
++
++    for (String lang : new String[]{"_lang", "de", "en"}) {
++      String description = multilingualObject.getString(lang);
++      if (description != null && !description.isBlank()) {
++        return description;
++      }
++    }
++
++    return null;
++  }
++
++  /**
++   * Extracts keywords from a provided DCAT-AP dataset object. The keywords are extracted
++   * from the "keywords" field, ensuring that only non-blank labels are returned.
++   *
++   * @param dataset the JsonObject representing the DCAT-AP dataset from which the keywords are extracted
++   * @return an array of Strings representing the extracted keywords, or an empty array if no keywords are found
++   */
++  private String[] extractKeywords(JsonObject dataset) {
++    JsonArray keywords = dataset.getJsonArray("keywords");
++    if (keywords == null) {
++      return new String[0];
++    }
++
++    return keywords.stream()
++        .filter(JsonObject.class::isInstance)
++        .map(JsonObject.class::cast)
++        .map(keywordObject -> keywordObject.getString("label"))
++        .filter(label -> label != null && !label.isBlank())
++        .toArray(String[]::new);
++  }
++
++}
+diff --git a/src/main/java/io/piveau/hub/search/services/embeddings/package-info.java b/src/main/java/io/piveau/hub/search/services/embeddings/package-info.java
+new file mode 100644
+index 00000000..cf4e0a68
+--- /dev/null
++++ b/src/main/java/io/piveau/hub/search/services/embeddings/package-info.java
+@@ -0,0 +1,4 @@
++@ModuleGen(name = "hub-search-embeddings-service", groupPackage = "io.piveau.hub.search.services.embeddings", useFutures = true)
++package io.piveau.hub.search.services.embeddings;
++
++import io.vertx.codegen.annotations.ModuleGen;
+\ No newline at end of file
+diff --git a/src/main/java/io/piveau/hub/search/services/search/SearchServiceImpl.java b/src/main/java/io/piveau/hub/search/services/search/SearchServiceImpl.java
+index 35af9a43..24cc75bf 100644
+--- a/src/main/java/io/piveau/hub/search/services/search/SearchServiceImpl.java
++++ b/src/main/java/io/piveau/hub/search/services/search/SearchServiceImpl.java
+@@ -6,6 +6,7 @@ import io.piveau.hub.search.Constants;
+ import io.piveau.hub.search.PiveauDocType;
+ import io.piveau.hub.search.Helper;
+ import io.piveau.hub.search.services.catalogues.CataloguesService;
++import io.piveau.hub.search.services.embeddings.EmbeddingService;
+ import io.piveau.hub.search.util.index.IndexManager;
+ import io.piveau.hub.search.util.request.QueryParams;
+ import io.piveau.hub.search.util.request.HeaderParams;
+@@ -17,6 +18,7 @@ import io.vertx.core.json.Json;
+ import io.vertx.core.json.JsonArray;
+ import io.vertx.core.json.JsonObject;
+ import io.vertx.serviceproxy.ServiceException;
++import org.apache.jena.sparql.function.library.leviathan.log;
+ import org.ehcache.Cache;
+ import org.ehcache.CacheManager;
+ import org.ehcache.config.builders.CacheConfigurationBuilder;
+@@ -40,6 +42,8 @@ public class SearchServiceImpl implements SearchService {
+ 
+     private final SearchClient client;
+ 
++    private final EmbeddingService embeddingService;
++
+     private final PiveauContext serviceContext;
+ 
+     private final CataloguesService cataloguesService;
+@@ -66,6 +70,8 @@ public class SearchServiceImpl implements SearchService {
+             this.client = searchClient;
+         }
+ 
++        this.embeddingService = EmbeddingService.createProxy(vertx, EmbeddingService.SERVICE_ADDRESS);
++
+         this.cataloguesService = CataloguesService.createProxy(vertx, CataloguesService.SERVICE_ADDRESS);
+ 
+         this.serviceContext = new PiveauContext("hub.search", "SearchService");
+@@ -243,34 +249,107 @@ public class SearchServiceImpl implements SearchService {
+         return !Helper.isNullOrEmpty(queryFilters);
+     }
+ 
++
++    /**
++     * Determines if semantic search should be used based on search query parameters.
++     *
++     * @param query The query parameters
++     * @return true if semantic search should be used, false otherwise
++     */
++    private boolean shouldUseSemanticSearch(QueryParams query) {
++
++        // Check if semantic search is disabled
++        if(!query.isSemanticSearch()) {
++            return false;
++        }
++
++        // Check if query is for autocomplete, scroll or count only
++        if (query.isAutocomplete() || query.isScroll() || query.isCountOnly()) {
++            return false;
++        }
++
++        // Check if query string is not empty
++        if(Helper.isNullOrEmpty(query.getQ())) {
++            return false;
++        }
++
++        // Check if any filters are defined …
++        if (Helper.isNullOrEmpty(query.getFilters())) {
++            return false;
++        }
++
++        // … and use semantic search only for filters on dataset queries
++        return query.getFilters().contains(Constants.DOC_TYPE_DATASET);
++    }
++
++
++    /**
++     * Enhances the given query parameters with a semantic embedding vector if semantic search is enabled.
++     * If semantic search is not applicable or embedding generation fails, the query parameters remain unchanged
++     * and semantic search is disabled.
++     *
++     * @param query The query parameters to enrich with an embedding vector.
++     * @return A Future containing the updated query parameters. If semantic search is disabled or embedding
++     *         generation fails, the returned query parameters are updated accordingly without a semantic
++     *         embedding vector.
++     */
++    private Future<QueryParams> enrichQueryWithEmbedding(QueryParams query) {
++        if (!shouldUseSemanticSearch(query)) {
++            return Future.succeededFuture(query);
++        }
++
++        return embeddingService.generateEmbedding(query.getQ())
++            .map(embedding -> {
++                // Compute embedding vector and add it to the query parameters
++                List<Float> queryVector = embedding.stream()
++                    .map(value -> ((Number)value).floatValue())
++                    .toList();
++                query.setQueryVector(queryVector);
++                // LOG.debug("Semantic query vector for '{}': {}", query.getQ(), queryVector);
++                return query;
++            })
++            .recover(err -> {
++                LOG.warn("Disable semantic search for request '{}' because embedding generation failed: {}", query.getQ(), err.getMessage());
++                query.setSemanticSearch(false);
++                query.setQueryVector(null);
++                return Future.succeededFuture(query);
++            });
++    }
++
+     @Override
+     public Future<JsonObject> search(String q, String h) {
+         QueryParams query = Json.decodeValue(q, QueryParams.class);
+         HeaderParams header = Json.decodeValue(h, HeaderParams.class);
+ 
++        return enrichQueryWithEmbedding(query)
++            .compose(queryWithEmbedding -> searchInternal(queryWithEmbedding, header));
++        // return searchInternal(query, header);
++    }
++
++    private Future<JsonObject> searchInternal(QueryParams query, HeaderParams header) {
+         List<String> docTypes = Helper.isNullOrEmpty(query.getFilters()) ?
+-                Collections.emptyList() :
+-                new ArrayList<>(query.getFilters());
++            Collections.emptyList() :
++            new ArrayList<>(query.getFilters());
+ 
+         if (Helper.isNullOrEmpty(docTypes)) {
+             // Quick search across all indices without aggregation
+             return client.search(query, header)
+-                    .compose(resp -> client.buildSearchResult(resp, null, query))
+-                    .compose(result -> handleSearchResult(result, query, header))
+-                    .recover(err -> Future.failedFuture(new ServiceException(400, err.getMessage())));
++                .compose(resp -> client.buildSearchResult(resp, null, query))
++                .compose(result -> handleSearchResult(result, query, header))
++                .recover(err -> Future.failedFuture(new ServiceException(400, err.getMessage())));
+         }
+ 
+         if (isFilterValid(docTypes)) {
+             return client.search(query, header)
+-                    .compose(searchResp -> {
+-                        List<Future<SearchResponse<JsonData>>> aggregationFutures = docTypes.stream()
+-                                .map(docType -> client.searchAggregation(query, header, docType)).toList();
++                .compose(searchResp -> {
++                    List<Future<SearchResponse<JsonData>>> aggregationFutures = docTypes.stream()
++                        .map(docType -> client.searchAggregation(query, header, docType)).toList();
+ 
+-                        return Future.all(aggregationFutures)
+-                                .compose(aggsFuture -> client.buildSearchResult(searchResp, aggsFuture.list(), query));
+-                    })
+-                    .compose(result -> handleSearchResult(result, query, header))
+-                    .recover(err -> Future.failedFuture(new ServiceException(400, err.getMessage())));
++                    return Future.all(aggregationFutures)
++                        .compose(aggsFuture -> client.buildSearchResult(searchResp, aggsFuture.list(), query));
++                })
++                .compose(result -> handleSearchResult(result, query, header))
++                .recover(err -> Future.failedFuture(new ServiceException(400, err.getMessage())));
+         } else {
+             return Future.failedFuture(new ServiceException(400, "One or more search filters is unknown"));
+         }
+diff --git a/src/main/java/io/piveau/hub/search/util/request/QueryParams.java b/src/main/java/io/piveau/hub/search/util/request/QueryParams.java
+index 87580106..1e5e7f55 100644
+--- a/src/main/java/io/piveau/hub/search/util/request/QueryParams.java
++++ b/src/main/java/io/piveau/hub/search/util/request/QueryParams.java
+@@ -47,6 +47,8 @@ public class QueryParams {
+     private boolean countOnly;
+     private String dateType;
+     private List<String> accessControlPermissions;
++    private boolean semanticSearch;
++    private List<Float> queryVector; // Qquery vector for semantic search
+ 
+     public QueryParams() {
+         this.q = "";
+@@ -78,6 +80,8 @@ public class QueryParams {
+         this.exists = null;
+         this.alias = null;
+         this.accessControlPermissions = null;
++        this.semanticSearch = true;
++        this.queryVector = null;
+     }
+ 
+     public QueryParams(String q,
+@@ -109,7 +113,8 @@ public class QueryParams {
+                        boolean autocomplete,
+                        List<String> exists,
+                        String alias,
+-                       boolean countOnly) {
++                       boolean countOnly,
++                       boolean semanticSearch) {
+         this.q = q;
+         this.filter = filter;
+         this.filters=filters;
+@@ -140,6 +145,8 @@ public class QueryParams {
+         this.exists = exists;
+         this.alias = alias;
+         this.countOnly = countOnly;
++        this.semanticSearch = semanticSearch;
++        this.queryVector = null;
+     }
+ 
+     public boolean getPublicFlag() {
+@@ -414,6 +421,14 @@ public class QueryParams {
+         this.accessControlPermissions = accessControlPermissions;
+     }
+ 
++    public boolean isSemanticSearch() { return semanticSearch; }
++
++    public void setSemanticSearch(boolean semanticSearch) { this.semanticSearch = semanticSearch; }
++
++    public List<Float> getQueryVector() { return queryVector; }
++
++    public void setQueryVector(List<Float> queryVector) { this.queryVector = queryVector; }
++
+     @Override
+     public String toString() {
+         return "Query{" +
+@@ -446,6 +461,8 @@ public class QueryParams {
+                 ", alias=" + alias +
+                 ", countOnly=" + countOnly +
+                 ", accessControlPermissions=" + accessControlPermissions +
++                ", semanticSearch=" + semanticSearch +
++                ", queryVector=" + (queryVector == null ? null : "[... with " + queryVector.size() + " elements]") +
+                 '}';
+     }
+ }
+diff --git a/src/main/resources/webroot/openapi.yaml b/src/main/resources/webroot/openapi.yaml
+index 0d434687..9a62c52a 100644
+--- a/src/main/resources/webroot/openapi.yaml
++++ b/src/main/resources/webroot/openapi.yaml
+@@ -264,6 +264,12 @@ paths:
+           schema:
+             type: boolean
+             default: false
++        - in: query
++          name: semanticSearch
++          description: Enable  hybrid semantic search for the query. Enabled by default.
++          schema:
++            type: boolean
++            default: true
+         - in: query
+           name: accessControlPermissions
+           description: Filter by access control permissions. Specify the access control permissions (view, edit, publish, delete) required for resources to be returned.
+@@ -1785,6 +1791,10 @@ components:
+         countryData:
+           type: boolean
+           description: If enabled only datasets from country catalogues are returned. If disabled only datasets from non-country catalogues are returned. If not specified (null), no filtering is performed.
++        semanticSearch:
++          type: boolean
++          description: Enables hybrid semantic search for the query. Enabled by default.
++          default: true
+         accessControlPermissions:
+           type: array
+           description: Filter by access control permissions. Specify the access control permissions (view, edit, publish, delete) required for resources to be returned.
+diff --git a/src/test/java/io/piveau/hub/search/IntegrationTest/HybridDatasetSearchIntegrationTest.java b/src/test/java/io/piveau/hub/search/IntegrationTest/HybridDatasetSearchIntegrationTest.java
+new file mode 100644
+index 00000000..295e303d
+--- /dev/null
++++ b/src/test/java/io/piveau/hub/search/IntegrationTest/HybridDatasetSearchIntegrationTest.java
+@@ -0,0 +1,155 @@
++package io.piveau.hub.search.IntegrationTest;
++
++import io.piveau.hub.search.Constants;
++import io.piveau.hub.search.MainVerticle;
++import io.piveau.hub.search.testutil.PollingUtils;
++import io.vertx.core.DeploymentOptions;
++import io.vertx.core.Vertx;
++import io.vertx.core.json.JsonArray;
++import io.vertx.core.json.JsonObject;
++import io.vertx.ext.web.client.WebClient;
++import io.vertx.junit5.Timeout;
++import io.vertx.junit5.VertxExtension;
++import io.vertx.junit5.VertxTestContext;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++
++import java.util.concurrent.TimeUnit;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++@ExtendWith(VertxExtension.class)
++public class HybridDatasetSearchIntegrationTest {
++
++  private WebClient webClient;
++
++  @BeforeEach
++  void setUp(Vertx vertx, VertxTestContext testContext) {
++
++    // For our tests we register a real EmbeddingService (with a local Ollama instance) to the Vert.x event bus
++    // This way we can test real embeddings, not only mocked ones
++    JsonObject embeddingConfig = new JsonObject()
++        .put(Constants.ENV_PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG, new JsonObject()
++            .put("url", "http://localhost:11434")
++            .put("model", "paraphrase-multilingual"));
++
++    testContext.completeNow();
++  }
++
++  @AfterEach
++  void tearDown(Vertx vertx, VertxTestContext testContext) {
++    if (webClient != null) {
++      webClient.close();
++    }
++
++    testContext.completeNow();
++  }
++
++  /**
++   * Creates a test configuration for a piveau-hub-search instance, including
++   * API keys, service ports, feature flags, Elasticsearch configuration, and
++   * embedding service configuration. This configuration is intended for testing
++   * hybrid search with embeddings and ensures the system is set up with predefined values.
++   *
++   * @return a {@link JsonObject} containing the test configuration, including
++   *         API keys, service ports, feature flags, Elasticsearch settings,
++   *         and service parameters for a local embedding service.
++   */
++  private JsonObject createSearchTestConfig() {
++    return new JsonObject()
++        .put("PIVEAU_HUB_SEARCH_API_KEY", "test-api-key")
++        .put("PIVEAU_HUB_SEARCH_SERVICE_PORT", 8080)
++        .put("PIVEAU_FEATURE_FLAGS", new JsonObject().put("rbac_security", false))
++        .put(Constants.ENV_PIVEAU_HUB_SEARCH_ES_CONFIG, createElasticsearchTestConfig())
++        .put(Constants.ENV_PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG, new JsonObject()
++            .put("url", "http://localhost:11434")
++            .put("model", "paraphrase-multilingual"));
++  }
++
++  /**
++   * Creates a test configuration for Elasticsearch, providing host, port, scheme,
++   * and index-specific settings such as mappings, settings files, index templates,
++   * and policies for different document types. The configuration is based on the
++   * default settings and can be used for testing the integration with Elasticsearch.
++   *
++   * @return a {@link JsonObject} representing the Elasticsearch test configuration.
++   */
++  JsonObject createElasticsearchTestConfig() {
++    return new JsonObject()
++        .put("host", "localhost")
++        .put("port", 9200)
++        .put("scheme", "http")
++        .put("index", new JsonObject()
++            .put(Constants.DOC_TYPE_DATASET, new JsonObject()
++                .put("settings", "conf/elasticsearch/settings.json")
++                .put("mapping", "conf/elasticsearch/mapping/dataset/standard.json"))
++            .put(Constants.DOC_TYPE_CATALOGUE, new JsonObject()
++                .put("settings", "conf/elasticsearch/settings.json")
++                .put("mapping", "conf/elasticsearch/mapping/catalogue/standard.json"))
++            .put(Constants.DOC_TYPE_DATASERVICE, new JsonObject()
++                .put("settings", "conf/elasticsearch/settings.json")
++                .put("mapping", "conf/elasticsearch/mapping/dataservice/standard.json"))
++            .put(Constants.DOC_TYPE_VOCABULARY, new JsonObject()
++                .put("settings", "conf/elasticsearch/settings.json"))
++            // .put("mapping", "conf/elasticsearch/mapping/vocabulary/standard.json"))
++            .put(Constants.DOC_TYPE_DATASETREVISIONS, new JsonObject()
++                .put("settings", "conf/elasticsearch/settings.json")
++                .put("mapping", "conf/elasticsearch/mapping/dataset/standard.json")
++                .put("indexTemplate", "conf/elasticsearch/indexTemplate.json")
++                .put("policy", "conf/elasticsearch/policy.json"))
++        ).put(Constants.DOC_TYPE_VOCABULARY, new JsonObject());
++  }
++
++  @Test
++  @DisplayName("Testing hybrid dataset search")
++  @Timeout(value = 30, timeUnit = TimeUnit.SECONDS) // MainVerticle and embedding model may take a while
++  void testHybridDatasetSearch(Vertx vertx, VertxTestContext testContext) {
++    webClient = WebClient.create(vertx);
++
++    JsonObject searchConfig = createSearchTestConfig();
++    JsonObject esConfig = createElasticsearchTestConfig();
++
++    PollingUtils.waitForElasticsearchReady(vertx, esConfig.getString("host", "localhost"), esConfig.getInteger("port", 9200))
++        .compose(v -> vertx.deployVerticle(MainVerticle.class.getName(), new DeploymentOptions().setConfig(searchConfig)))
++        .compose(deploymentId -> webClient
++            .get(8080,"localhost","/search")
++            .addQueryParam("q", "Rostock")
++            .addQueryParam("filters", Constants.DOC_TYPE_DATASET)
++            .addQueryParam("page", "0")
++            .addQueryParam("limit", "50")
++            .addQueryParam("aggregation", "false")
++            .addQueryParam("semanticSearch", "true")
++            .send())
++        .onComplete(testContext.succeeding(response -> {
++
++          // TODO: Define search term and number of expected results as constants and avoid hardcoding
++
++          // Was HTTP request successful?
++          assertEquals(200, response.statusCode(), response.bodyAsString());
++
++          // Check response structure
++          JsonObject body = response.bodyAsJsonObject();
++          assertNotNull(body, "Response body must contain a JSON response.");
++          assertTrue(body.containsKey("result"), "Response must contain 'result' field");
++
++          JsonObject result = body.getJsonObject("result");
++          assertNotNull(result, "Response field 'result' must not be null.");
++          assertTrue(result.containsKey("count"), "Result must contain 'count' field with the found dataset count.");
++          assertTrue(result.containsKey("results"), "Result must contain 'results' field with the found datasets.");
++
++          // Check number of search results
++          int count = result.getInteger("count");
++          assertEquals(4, count, "Search for 'Rostock' must return exactly 4 datasets.");
++
++          JsonArray results = result.getJsonArray("results");
++          assertNotNull(results, "Result field 'results' must not be null and should contain a list of datasets.");
++          assertEquals(4, results.size(), "Result list must contain exactly 4 datasets");
++
++          testContext.completeNow();
++        }))
++        .onFailure(testContext::failNow);
++  }
++}
+diff --git a/src/test/java/io/piveau/hub/search/services/datasets/DatasetsServiceTest.java b/src/test/java/io/piveau/hub/search/services/datasets/DatasetsServiceTest.java
+new file mode 100644
+index 00000000..aff1c6be
+--- /dev/null
++++ b/src/test/java/io/piveau/hub/search/services/datasets/DatasetsServiceTest.java
+@@ -0,0 +1,252 @@
++package io.piveau.hub.search.services.datasets;
++
++import co.elastic.clients.elasticsearch.core.search.Hit;
++import co.elastic.clients.json.JsonData;
++import io.piveau.hub.search.Constants;
++import io.piveau.hub.search.engine.SearchClient;
++import io.piveau.hub.search.services.catalogues.CataloguesService;
++import io.piveau.hub.search.services.embeddings.EmbeddingService;
++import io.piveau.hub.search.services.vocabulary.VocabularyService;
++import io.piveau.hub.search.testutil.PollingUtils;
++import io.piveau.hub.search.util.index.IndexManager;
++import io.piveau.hub.search.util.request.QueryParams;
++import io.vertx.core.Future;
++import io.vertx.core.Promise;
++import io.vertx.core.Vertx;
++import io.vertx.core.json.JsonArray;
++import io.vertx.core.json.JsonObject;
++import io.vertx.junit5.Timeout;
++import io.vertx.junit5.VertxExtension;
++import io.vertx.junit5.VertxTestContext;
++import io.vertx.serviceproxy.ServiceBinder;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++
++import java.util.List;
++
++import static io.piveau.hub.search.services.datasets.DatasetsService.create;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++@ExtendWith(VertxExtension.class)
++public class DatasetsServiceTest {
++
++  @BeforeEach
++  void setUp(Vertx vertx, VertxTestContext testContext) {
++
++    // For our tests we register a real EmbeddingService (with a local Ollama instance) to the Vert.x event bus
++    // This way we can test real embeddings, not only mocked ones
++    JsonObject embeddingConfig = new JsonObject()
++        .put(Constants.ENV_PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG, new JsonObject()
++            .put("url", "http://localhost:11434")
++            .put("model", "paraphrase-multilingual"));
++
++    EmbeddingService.create(vertx, embeddingConfig)
++        .onSuccess(embeddingService -> {
++          new ServiceBinder(vertx)
++              .setAddress(EmbeddingService.SERVICE_ADDRESS)
++              .register(EmbeddingService.class, embeddingService);
++          testContext.completeNow();
++        })
++        .onFailure(testContext::failNow);
++
++    // TODO: Implement EmbeddingService and SearchClient as Mockito Mocks
++  }
++
++  /**
++   * Creates a test configuration for Elasticsearch, providing host, port, scheme,
++   * and index-specific settings such as mappings, settings files, index templates,
++   * and policies for different document types. The configuration is based on the
++   * default settings and can be used for testing the integration with Elasticsearch.
++   *
++   * @return a {@link JsonObject} representing the Elasticsearch test configuration.
++   */
++  JsonObject createElasticsearchTestConfig() {
++    return new JsonObject()
++        .put("host", "localhost")
++        .put("port", 9200)
++        .put("scheme", "http")
++        .put("index", new JsonObject()
++            .put(Constants.DOC_TYPE_DATASET, new JsonObject()
++                .put("settings", "conf/elasticsearch/settings.json")
++                .put("mapping", "conf/elasticsearch/mapping/dataset/standard.json"))
++            .put(Constants.DOC_TYPE_CATALOGUE, new JsonObject()
++                .put("settings", "conf/elasticsearch/settings.json")
++                .put("mapping", "conf/elasticsearch/mapping/catalogue/standard.json"))
++            .put(Constants.DOC_TYPE_DATASERVICE, new JsonObject()
++                .put("settings", "conf/elasticsearch/settings.json")
++                .put("mapping", "conf/elasticsearch/mapping/dataservice/standard.json"))
++            .put(Constants.DOC_TYPE_VOCABULARY, new JsonObject()
++                .put("settings", "conf/elasticsearch/settings.json"))
++                // .put("mapping", "conf/elasticsearch/mapping/vocabulary/standard.json"))
++            .put(Constants.DOC_TYPE_DATASETREVISIONS, new JsonObject()
++                .put("settings", "conf/elasticsearch/settings.json")
++                .put("mapping", "conf/elasticsearch/mapping/dataset/standard.json")
++                .put("indexTemplate", "conf/elasticsearch/indexTemplate.json")
++                .put("policy", "conf/elasticsearch/policy.json"))
++        ).put(Constants.DOC_TYPE_VOCABULARY, new JsonObject());
++  }
++
++  @Test
++  @DisplayName("Test reindexing with embeddings for all documents")
++  @Timeout(value = 120, timeUnit = java.util.concurrent.TimeUnit.MINUTES) // Embeddings may take a while to generate
++  void testEmbeddingGeneration(Vertx vertx, VertxTestContext testContext) {
++
++    JsonObject esConfig = createElasticsearchTestConfig();
++    IndexManager indexManager = IndexManager.create(vertx, esConfig, null);
++    DatasetsService datasetService = create(vertx, esConfig, indexManager).result();
++    SearchClient searchClient = SearchClient.build(vertx, esConfig, indexManager);
++
++    PollingUtils.waitForElasticsearchReady(
++          vertx,
++          esConfig.getString("host", "localhost"),
++          esConfig.getInteger("port", 9200)
++        )
++        .compose(v -> datasetService.triggerReindexingWithEmbeddings())
++        .compose(v -> {
++            // Make sure ES index has refreshed, by waiting for 2 seconds
++            Promise<Void> refreshPromise = Promise.promise();
++            vertx.setTimer(2000, id -> refreshPromise.complete());
++            return refreshPromise.future();
++        })
++        .compose(v -> {
++            QueryParams query = new QueryParams();
++            query.setFilters(List.of(Constants.DOC_TYPE_DATASET));
++            query.setSize(50);
++            return searchClient.paginate(query, searchResponse -> {
++                List<Hit<JsonData>> hits = searchResponse.hits().hits();
++                for (Hit<JsonData> hit : hits) {
++                    if (hit.source() == null) continue; // Ignore null sources
++                    JsonObject source = new JsonObject(hit.source().toJson().toString());
++                    String id = hit.id();
++
++                    // Check if the dataset contains all the required embedding fields
++                    checkEmbedding(source, id, "title", "title_embedding");
++                    checkEmbedding(source, id, "description", "description_embedding");
++                    checkEmbedding(source, id, "keywords", "keywords_embedding");
++                }
++            });
++        })
++        .onComplete(testContext.succeeding(v -> {
++            testContext.completeNow();
++        }))
++        .onFailure(testContext::failNow);
++  }
++
++  @Test
++  @DisplayName("Test bulk indexing with embeddings")
++  @Timeout(value = 120, timeUnit = java.util.concurrent.TimeUnit.MINUTES) // Embeddings may take a while to generate
++  void testBulkEmbeddingGeneration(Vertx vertx, VertxTestContext testContext) {
++
++    JsonObject esConfig = createElasticsearchTestConfig();
++    IndexManager indexManager = IndexManager.create(vertx, esConfig, null);
++    DatasetsService datasetService = DatasetsService.create(vertx, esConfig, indexManager).result();
++    SearchClient searchClient = SearchClient.build(vertx, esConfig, indexManager);
++
++    // Register mock for CataloguesService
++
++    CataloguesService cataloguesService = mock(CataloguesService.class);
++    when(cataloguesService.resolveCatalogueInPayloadArray(eq(Constants.DOC_TYPE_DATASET), any(JsonArray.class)))
++        .thenAnswer(invocation -> Future.succeededFuture(invocation.getArgument(1)));
++
++    new ServiceBinder(vertx)
++        .setAddress(CataloguesService.SERVICE_ADDRESS)
++        .register(CataloguesService.class, cataloguesService);
++
++    // Register mock for VocabularyService
++
++    VocabularyService vocabularyService = mock(VocabularyService.class);
++    when(vocabularyService.replaceVocabularyInPayloadList(any(JsonArray.class)))
++        .thenAnswer(invocation -> Future.succeededFuture(invocation.getArgument(0)));
++
++    new ServiceBinder(vertx)
++        .setAddress(VocabularyService.SERVICE_ADDRESS)
++        .register(VocabularyService.class, vocabularyService);
++
++    PollingUtils.waitForElasticsearchReady(
++            vertx,
++            esConfig.getString("host", "localhost"),
++            esConfig.getInteger("port", 9200)
++        )
++        .compose(v -> {
++          // Load all existing dataset documents
++          QueryParams query = new QueryParams();
++          query.setFilters(List.of(Constants.DOC_TYPE_DATASET));
++          query.setSize(50);
++          query.setAggregation(false);
++
++          JsonArray datasets = new JsonArray();
++          return searchClient.paginate(query, searchResponse -> {
++            List<Hit<JsonData>> hits = searchResponse.hits().hits();
++            for (Hit<JsonData> hit : hits) {
++              if (hit.source() != null) {
++                JsonObject source = new JsonObject(hit.source().toJson().toString());
++                // Remove embeddings if existing, so they are re-generated
++                source.remove("title_embedding");
++                source.remove("description_embedding");
++                source.remove("keywords_embedding");
++                datasets.add(source);
++              }
++            }
++          }).map(v2 -> datasets);
++        })
++        .compose(datasetService::createOrUpdateDatasetBulk)
++        .compose(v -> {
++            // Make sure ES index has refreshed, by waiting for 2 seconds
++            // Without waiting, the index may not contain the newly created documents yet
++            Promise<Void> refreshPromise = Promise.promise();
++            vertx.setTimer(2000, id -> refreshPromise.complete());
++            return refreshPromise.future();
++        })
++        .compose(v -> {
++          // Verify enrichment
++          QueryParams query = new QueryParams();
++          query.setFilters(List.of(Constants.DOC_TYPE_DATASET));
++          query.setSize(50);
++          return searchClient.paginate(query, searchResponse -> {
++            List<Hit<JsonData>> hits = searchResponse.hits().hits();
++            for (Hit<JsonData> hit : hits) {
++              if (hit.source() == null) continue;
++              JsonObject source = new JsonObject(hit.source().toJson().toString());
++              String id = hit.id();
++
++              checkEmbedding(source, id, "title", "title_embedding");
++              checkEmbedding(source, id, "description", "description_embedding");
++              checkEmbedding(source, id, "keywords", "keywords_embedding");
++            }
++          });
++        })
++        .onComplete(testContext.succeeding(v -> testContext.completeNow()))
++        .onFailure(testContext::failNow);
++  }
++
++  private void checkEmbedding(JsonObject source, String id, String sourceField, String embeddingField) {
++
++    if (!source.containsKey(sourceField)) {
++      return;
++    }
++
++    assertTrue(source.containsKey(embeddingField), "Document " + id + " misses embedding " + embeddingField + " although " + sourceField + " field exists");
++
++    JsonArray embedding = source.getJsonArray(embeddingField);
++    assertNotNull(embedding, "Document " + id + " embedding " + embeddingField + " cannot be null");
++    assertFalse(embedding.isEmpty(), "Document " + id + "embedding " + embeddingField + " vector dimension must be greater than 0");
++
++    boolean allZeros = true;
++    for (int i = 0; i < embedding.size(); i++) {
++      if (embedding.getDouble(i) != 0.0) {
++        allZeros = false;
++        break;
++      }
++    }
++    assertFalse(allZeros, "Document " + id + " embedding " + embeddingField + " must not contain all zeros");
++  }
++
++}
+diff --git a/src/test/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceTest.java b/src/test/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceTest.java
+new file mode 100644
+index 00000000..808a4cac
+--- /dev/null
++++ b/src/test/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceTest.java
+@@ -0,0 +1,91 @@
++package io.piveau.hub.search.services.embeddings;
++
++import io.piveau.hub.search.Constants;
++import io.vertx.core.buffer.Buffer;
++import io.vertx.core.json.JsonArray;
++import io.vertx.core.json.JsonObject;
++import io.vertx.core.Vertx;
++import io.vertx.junit5.VertxExtension;
++import io.vertx.junit5.VertxTestContext;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++@ExtendWith(VertxExtension.class)
++public class EmbeddingServiceTest {
++
++  static final int EMBEDDING_SIZE = 768;  // Definiert die Vektor-Dimension für das verwendete Embedding-Modell
++
++  @BeforeEach
++  void setUp(Vertx vertx, VertxTestContext testContext) {
++    // TODO: Implementiere einen Mock-Embedding-Service via `vertx.createHttpServer()` oder Mockito
++    testContext.completeNow();
++  }
++
++  @Test
++  @DisplayName("Test Embedding Service")
++  void testGenerateEmbedding(Vertx vertx, VertxTestContext testContext) {
++
++
++
++    JsonObject config = new JsonObject()
++        .put(Constants.ENV_PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG, new JsonObject()
++            .put("url", "http://localhost:11434")
++            .put("model", "paraphrase-multilingual"));
++
++    EmbeddingService service = new EmbeddingServiceImpl(vertx, config);
++
++    service.generateEmbedding("Fahrrad Verkehrsdaten")
++            .onComplete(testContext.succeeding(embedding -> {
++              assertNotNull(embedding);
++              assertEquals(EMBEDDING_SIZE, embedding.size());
++              // Wir prüfen stichprobenartig drei konkrete Embedding-Werte
++              assertEquals(-0.023943307, embedding.getDouble(0), 0.0001);
++              assertEquals(0.0418487, embedding.getDouble(1), 0.0001);
++              assertEquals(-0.089255266, embedding.getDouble(EMBEDDING_SIZE-1), 0.0001);
++              testContext.completeNow();
++            }));
++  }
++
++  @Test
++  @DisplayName("Test adding embeddings for titles, keywords and descriptions to a DCAT-AP-Dataset.")
++  void testEnrichDocumentWithEmbeddings(Vertx vertx, VertxTestContext testContext) {
++
++    JsonObject config = new JsonObject()
++        .put(Constants.ENV_PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG, new JsonObject()
++            .put("url", "http://localhost:11434")
++            .put("model", "paraphrase-multilingual"));
++
++    EmbeddingService service = new EmbeddingServiceImpl(vertx, config);
++
++    vertx.fileSystem().readFile("documents/dataset1_index_dcatap2.json")
++            .map(Buffer::toJsonObject)
++            .compose(dataset -> service.enrichDatasetWithEmbeddings(dataset))
++            .onSuccess(enrichedDataset -> {
++
++              assertNotNull(enrichedDataset);
++              assertTrue(enrichedDataset.containsKey("title_embedding"));
++              assertTrue(enrichedDataset.containsKey("description_embedding"));
++              assertTrue(enrichedDataset.containsKey("keywords_embedding"));
++
++              JsonArray titleEmbedding = enrichedDataset.getJsonArray("title_embedding");
++              JsonArray descriptionEmbedding = enrichedDataset.getJsonArray("description_embedding");
++              JsonArray keywordsEmbedding = enrichedDataset.getJsonArray("keywords_embedding");
++
++              assertEquals(EMBEDDING_SIZE, titleEmbedding.size());
++              assertEquals(EMBEDDING_SIZE, descriptionEmbedding.size());
++              assertEquals(EMBEDDING_SIZE, keywordsEmbedding.size());
++
++              // Prüfe ob nicht einfach nur einen 0-Vektor zurückgegeben wurde
++              assertTrue(titleEmbedding.stream().anyMatch(v -> (double) v != 0.0));
++              assertTrue(descriptionEmbedding.stream().anyMatch(v -> (double) v != 0.0));
++              assertTrue(keywordsEmbedding.stream().anyMatch(v -> (double) v != 0.0));
++
++              testContext.completeNow();
++            })
++            .onFailure(testContext::failNow);
++  }
++}
+diff --git a/third-party/THIRD-PARTY.txt b/third-party/THIRD-PARTY.txt
+index b8148a0a..3d10d7de 100644
+--- a/third-party/THIRD-PARTY.txt
++++ b/third-party/THIRD-PARTY.txt
+@@ -1,16 +1,16 @@
+ 
+-Lists of 258 third-party dependencies.
++Lists of 260 third-party dependencies.
+      (Public Domain) AOP alliance (aopalliance:aopalliance:1.0 - http://aopalliance.sourceforge.net)
+-     (Eclipse Public License - v 1.0) (GNU Lesser General Public License) Logback Classic Module (ch.qos.logback:logback-classic:1.5.18 - http://logback.qos.ch/logback-classic)
+-     (Eclipse Public License - v 1.0) (GNU Lesser General Public License) Logback Core Module (ch.qos.logback:logback-core:1.5.18 - http://logback.qos.ch/logback-core)
+-     (The Apache Software License, Version 2.0) Elasticsearch Java API Client (co.elastic.clients:elasticsearch-java:8.18.3 - https://github.com/elastic/elasticsearch-java/)
+-     (Apache License, Version 2.0) Titanium JCS (com.apicatalog:titanium-jcs:1.0.0 - https://github.com/filip26/titanium-jcs)
+-     (Apache License, Version 2.0) Titanium JSON-LD 1.1 (JRE11) (com.apicatalog:titanium-json-ld:1.6.0 - https://github.com/filip26/titanium-json-ld)
++     (Eclipse Public License - v 1.0) (GNU Lesser General Public License) Logback Classic Module (ch.qos.logback:logback-classic:1.5.19 - http://logback.qos.ch/logback-classic)
++     (Eclipse Public License - v 1.0) (GNU Lesser General Public License) Logback Core Module (ch.qos.logback:logback-core:1.5.19 - http://logback.qos.ch/logback-core)
++     (The Apache Software License, Version 2.0) Elasticsearch Java API Client (co.elastic.clients:elasticsearch-java:8.17.10 - https://github.com/elastic/elasticsearch-java/)
++     (Apache License, Version 2.0) Titanium JCS (com.apicatalog:titanium-jcs:1.1.1 - https://github.com/filip26/titanium-jcs)
++     (Apache License, Version 2.0) Titanium JSON-LD 1.1 (JRE11) (com.apicatalog:titanium-json-ld:1.7.0 - https://github.com/filip26/titanium-json-ld)
+      (Apache License, Version 2.0) Titanium RDF API (com.apicatalog:titanium-rdf-api:1.0.0 - https://github.com/filip26/titanium-rdf-api)
+-     (Apache License, Version 2.0) Titanium RDF N-QUADS (com.apicatalog:titanium-rdf-n-quads:1.0.0 - https://github.com/filip26/titanium-rdf-n-quads)
++     (Apache License, Version 2.0) Titanium RDF N-QUADS (com.apicatalog:titanium-rdf-n-quads:1.0.2 - https://github.com/filip26/titanium-rdf-n-quads)
+      (The Apache Software License, Version 2.0) Jackson-annotations (com.fasterxml.jackson.core:jackson-annotations:2.16.1 - https://github.com/FasterXML/jackson)
+-     (The Apache Software License, Version 2.0) Jackson-core (com.fasterxml.jackson.core:jackson-core:2.18.2 - https://github.com/FasterXML/jackson-core)
+-     (The Apache Software License, Version 2.0) jackson-databind (com.fasterxml.jackson.core:jackson-databind:2.18.2 - https://github.com/FasterXML/jackson)
++     (The Apache Software License, Version 2.0) Jackson-core (com.fasterxml.jackson.core:jackson-core:2.17.0 - https://github.com/FasterXML/jackson-core)
++     (The Apache Software License, Version 2.0) jackson-databind (com.fasterxml.jackson.core:jackson-databind:2.17.0 - https://github.com/FasterXML/jackson)
+      (The Apache Software License, Version 2.0) Jackson-dataformat-YAML (com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.16.1 - https://github.com/FasterXML/jackson-dataformats-text)
+      (The Apache Software License, Version 2.0) Jackson datatype: jdk8 (com.fasterxml.jackson.datatype:jackson-datatype-jdk8:2.16.1 - https://github.com/FasterXML/jackson-modules-java8/jackson-datatype-jdk8)
+      (The Apache Software License, Version 2.0) Jackson datatype: JSR310 (com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.16.1 - https://github.com/FasterXML/jackson-modules-java8/jackson-datatype-jsr310)
+@@ -21,7 +21,7 @@ Lists of 258 third-party dependencies.
+      (The Apache Software License, Version 2.0) Java UUID Generator (com.fasterxml.uuid:java-uuid-generator:5.1.0 - https://github.com/cowtowncoder/java-uuid-generator)
+      (MIT License) dexx (com.github.andrewoma.dexx:collection:0.7 - https://github.com/andrewoma/dexx)
+      (Apache License, Version 2.0) Caffeine cache (com.github.ben-manes.caffeine:caffeine:3.2.2 - https://github.com/ben-manes/caffeine)
+-     (Apache-2.0) Testcontainers Keycloak (com.github.dasniko:testcontainers-keycloak:3.4.0 - https://github.com/dasniko/testcontainers-keycloak)
++     (Apache-2.0) Testcontainers Keycloak (com.github.dasniko:testcontainers-keycloak:3.9.0 - https://github.com/dasniko/testcontainers-keycloak)
+      (The Apache Software License, Version 2.0) docker-java-api (com.github.docker-java:docker-java-api:3.4.2 - https://github.com/docker-java/docker-java)
+      (The Apache Software License, Version 2.0) docker-java-transport (com.github.docker-java:docker-java-transport:3.4.2 - https://github.com/docker-java/docker-java)
+      (The Apache Software License, Version 2.0) docker-java-transport-zerodep (com.github.docker-java:docker-java-transport-zerodep:3.4.2 - https://github.com/docker-java/docker-java)
+@@ -31,101 +31,103 @@ Lists of 258 third-party dependencies.
+      (Apache Software License, version 2.0) (Lesser General Public License, version 3 or greater) msg-simple (com.github.java-json-tools:msg-simple:1.2 - https://github.com/java-json-tools/msg-simple)
+      (Revised BSD License) JSONLD Java :: Core (com.github.jsonld-java:jsonld-java:0.13.4 - http://github.com/jsonld-java/jsonld-java/jsonld-java/)
+      (The Apache Software License, Version 2.0) FindBugs-jsr305 (com.google.code.findbugs:jsr305:3.0.2 - http://findbugs.sourceforge.net/)
+-     (Apache-2.0) Gson (com.google.code.gson:gson:2.13.1 - https://github.com/google/gson)
+-     (Apache 2.0) error-prone annotations (com.google.errorprone:error_prone_annotations:2.38.0 - https://errorprone.info/error_prone_annotations)
++     (Apache-2.0) Gson (com.google.code.gson:gson:2.13.2 - https://github.com/google/gson)
++     (Apache 2.0) error-prone annotations (com.google.errorprone:error_prone_annotations:2.41.0 - https://errorprone.info/error_prone_annotations)
+      (The Apache Software License, Version 2.0) Guava InternalFutureFailureAccess and InternalFutures (com.google.guava:failureaccess:1.0.1 - https://github.com/google/guava/failureaccess)
+      (Apache License, Version 2.0) Guava: Google Core Libraries for Java (com.google.guava:guava:32.1.2-jre - https://github.com/google/guava)
+      (The Apache Software License, Version 2.0) Guava ListenableFuture only (com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava - https://github.com/google/guava/listenablefuture)
+      (The Apache Software License, Version 2.0) Google Guice - Core Library (com.google.inject:guice:7.0.0 - https://github.com/google/guice/guice)
+-     (BSD-3-Clause) Protocol Buffers [Core] (com.google.protobuf:protobuf-java:4.31.1 - https://developers.google.com/protocol-buffers/protobuf-java/)
++     (BSD-3-Clause) Protocol Buffers [Core] (com.google.protobuf:protobuf-java:4.32.1 - https://developers.google.com/protocol-buffers/protobuf-java/)
+      (The Apache Software License, Version 2.0) JSON.simple (com.googlecode.json-simple:json-simple:1.1.1 - http://code.google.com/p/json-simple/)
+      (The Apache Software License, Version 2.0) asyncutil (com.ibm.async:asyncutil:0.1.0 - http://github.com/ibm/java-async-util)
+      (Apache License 2.0) kotlin-csv (com.jsoizo:kotlin-csv-jvm:1.10.0 - https://github.com/jsoizo/kotlin-csv)
+-     (The Apache Software License, Version 2.0) okhttp (com.squareup.okhttp3:okhttp:4.12.0 - https://square.github.io/okhttp/)
+-     (The Apache Software License, Version 2.0) okio (com.squareup.okio:okio:3.6.0 - https://github.com/square/okio/)
+-     (The Apache Software License, Version 2.0) okio (com.squareup.okio:okio-jvm:3.6.0 - https://github.com/square/okio/)
++     (The Apache Software License, Version 2.0) okhttp (com.squareup.okhttp3:okhttp-jvm:5.2.1 - https://square.github.io/okhttp/)
++     (The Apache Software License, Version 2.0) okio (com.squareup.okio:okio-jvm:3.16.1 - https://github.com/square/okio/)
+      (EDL 1.0) Jakarta Activation (com.sun.activation:jakarta.activation:1.2.2 - https://github.com/eclipse-ee4j/jaf/jakarta.activation)
+      (Eclipse Distribution License - v 1.0) istack common utility code runtime (com.sun.istack:istack-commons-runtime:3.0.12 - https://projects.eclipse.org/projects/ee4j/istack-commons/istack-commons-runtime)
+      (Eclipse Distribution License - v 1.0) istack common utility code tools (com.sun.istack:istack-commons-tools:4.1.2 - https://projects.eclipse.org/projects/ee4j/istack-commons/istack-commons-tools)
+      (Eclipse Distribution License - v 1.0) RelaxNG Datatype (com.sun.xml.bind.external:relaxng-datatype:4.0.3 - https://eclipse-ee4j.github.io/jaxb-ri/)
+      (Eclipse Distribution License - v 1.0) RNGOM (com.sun.xml.bind.external:rngom:4.0.3 - https://eclipse-ee4j.github.io/jaxb-ri/)
+      (Apache-2.0) Apache Commons Codec (commons-codec:commons-codec:1.18.0 - https://commons.apache.org/proper/commons-codec/)
+-     (Apache-2.0) Apache Commons IO (commons-io:commons-io:2.14.0 - https://commons.apache.org/proper/commons-io/)
++     (Apache-2.0) Apache Commons IO (commons-io:commons-io:2.18.0 - https://commons.apache.org/proper/commons-io/)
+      (The Apache Software License, Version 2.0) Apache Commons Logging (commons-logging:commons-logging:1.2 - http://commons.apache.org/proper/commons-logging/)
+      (The Apache Software License, Version 2.0) micrometer-commons (io.micrometer:micrometer-commons:1.12.13 - https://github.com/micrometer-metrics/micrometer)
+      (The Apache Software License, Version 2.0) micrometer-core (io.micrometer:micrometer-core:1.12.13 - https://github.com/micrometer-metrics/micrometer)
+      (The Apache Software License, Version 2.0) micrometer-observation (io.micrometer:micrometer-observation:1.12.13 - https://github.com/micrometer-metrics/micrometer)
+      (The Apache Software License, Version 2.0) micrometer-registry-prometheus (io.micrometer:micrometer-registry-prometheus:1.12.13 - https://github.com/micrometer-metrics/micrometer)
+-     (Apache License, Version 2.0) Netty/Buffer (io.netty:netty-buffer:4.1.125.Final - https://netty.io/netty-buffer/)
+-     (Apache License, Version 2.0) Netty/Codec (io.netty:netty-codec:4.1.125.Final - https://netty.io/netty-codec/)
+-     (Apache License, Version 2.0) Netty/Codec/DNS (io.netty:netty-codec-dns:4.1.125.Final - https://netty.io/netty-codec-dns/)
+-     (Apache License, Version 2.0) Netty/Codec/HTTP (io.netty:netty-codec-http:4.1.125.Final - https://netty.io/netty-codec-http/)
+-     (Apache License, Version 2.0) Netty/Codec/HTTP2 (io.netty:netty-codec-http2:4.1.125.Final - https://netty.io/netty-codec-http2/)
+-     (Apache License, Version 2.0) Netty/Codec/Socks (io.netty:netty-codec-socks:4.1.125.Final - https://netty.io/netty-codec-socks/)
+-     (Apache License, Version 2.0) Netty/Common (io.netty:netty-common:4.1.125.Final - https://netty.io/netty-common/)
+-     (Apache License, Version 2.0) Netty/Handler (io.netty:netty-handler:4.1.125.Final - https://netty.io/netty-handler/)
+-     (Apache License, Version 2.0) Netty/Handler/Proxy (io.netty:netty-handler-proxy:4.1.125.Final - https://netty.io/netty-handler-proxy/)
+-     (Apache License, Version 2.0) Netty/Resolver (io.netty:netty-resolver:4.1.125.Final - https://netty.io/netty-resolver/)
+-     (Apache License, Version 2.0) Netty/Resolver/DNS (io.netty:netty-resolver-dns:4.1.125.Final - https://netty.io/netty-resolver-dns/)
+-     (Apache License, Version 2.0) Netty/Transport (io.netty:netty-transport:4.1.125.Final - https://netty.io/netty-transport/)
+-     (Apache License, Version 2.0) Netty/Transport/Native/Unix/Common (io.netty:netty-transport-native-unix-common:4.1.125.Final - https://netty.io/netty-transport-native-unix-common/)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-api:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-context:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-exporter-common:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-exporter-otlp:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-exporter-otlp-common:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-exporter-sender-okhttp:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-common:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-logs:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-metrics:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
+-     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-trace:1.51.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (Apache License, Version 2.0) Netty/Buffer (io.netty:netty-buffer:4.1.128.Final - https://netty.io/netty-buffer/)
++     (Apache License, Version 2.0) Netty/Codec (io.netty:netty-codec:4.1.128.Final - https://netty.io/netty-codec/)
++     (Apache License, Version 2.0) Netty/Codec/DNS (io.netty:netty-codec-dns:4.1.128.Final - https://netty.io/netty-codec-dns/)
++     (Apache License, Version 2.0) Netty/Codec/HTTP (io.netty:netty-codec-http:4.1.128.Final - https://netty.io/netty-codec-http/)
++     (Apache License, Version 2.0) Netty/Codec/HTTP2 (io.netty:netty-codec-http2:4.1.128.Final - https://netty.io/netty-codec-http2/)
++     (Apache License, Version 2.0) Netty/Codec/Socks (io.netty:netty-codec-socks:4.1.128.Final - https://netty.io/netty-codec-socks/)
++     (Apache License, Version 2.0) Netty/Common (io.netty:netty-common:4.1.128.Final - https://netty.io/netty-common/)
++     (Apache License, Version 2.0) Netty/Handler (io.netty:netty-handler:4.1.128.Final - https://netty.io/netty-handler/)
++     (Apache License, Version 2.0) Netty/Handler/Proxy (io.netty:netty-handler-proxy:4.1.128.Final - https://netty.io/netty-handler-proxy/)
++     (Apache License, Version 2.0) Netty/Resolver (io.netty:netty-resolver:4.1.128.Final - https://netty.io/netty-resolver/)
++     (Apache License, Version 2.0) Netty/Resolver/DNS (io.netty:netty-resolver-dns:4.1.128.Final - https://netty.io/netty-resolver-dns/)
++     (Apache License, Version 2.0) Netty/Resolver/DNS/Classes/MacOS (io.netty:netty-resolver-dns-classes-macos:4.1.128.Final - https://netty.io/netty-resolver-dns-classes-macos/)
++     (Apache License, Version 2.0) Netty/Resolver/DNS/Native/MacOS (io.netty:netty-resolver-dns-native-macos:4.1.128.Final - https://netty.io/netty-resolver-dns-native-macos/)
++     (Apache License, Version 2.0) Netty/Transport (io.netty:netty-transport:4.1.128.Final - https://netty.io/netty-transport/)
++     (Apache License, Version 2.0) Netty/Transport/Native/Unix/Common (io.netty:netty-transport-native-unix-common:4.1.128.Final - https://netty.io/netty-transport-native-unix-common/)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-api:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-common:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-context:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-exporter-common:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-exporter-otlp:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-exporter-otlp-common:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-exporter-sender-okhttp:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-common:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-logs:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-metrics:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
++     (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-sdk-trace:1.55.0 - https://github.com/open-telemetry/opentelemetry-java)
+      (The Apache License, Version 2.0) OpenTelemetry Java (io.opentelemetry:opentelemetry-semconv:1.30.1-alpha - https://github.com/open-telemetry/opentelemetry-java)
+      (Unknown license) piveau-indexing (io.piveau.indexing:piveau-indexing:1.0.18 - no url defined)
+      (Unknown license) piveau-pipe-model (io.piveau.pipe:pipe-model:4.5.1 - no url defined)
+-     (Unknown license) piveau-utils (io.piveau.utils:piveau-utils:11.4.6 - no url defined)
++     (Unknown license) piveau-utils (io.piveau.utils:piveau-utils:11.4.10 - no url defined)
+      (The Apache Software License, Version 2.0) Prometheus Java Simpleclient (io.prometheus:simpleclient:0.16.0 - http://github.com/prometheus/client_java/simpleclient)
+      (The Apache Software License, Version 2.0) Prometheus Java Simpleclient Common (io.prometheus:simpleclient_common:0.16.0 - http://github.com/prometheus/client_java/simpleclient_common)
+      (The Apache Software License, Version 2.0) Prometheus Java Span Context Supplier - Common (io.prometheus:simpleclient_tracer_common:0.16.0 - http://github.com/prometheus/client_java/simpleclient_tracer/simpleclient_tracer_common)
+      (The Apache Software License, Version 2.0) Prometheus Java Span Context Supplier - OpenTelemetry (io.prometheus:simpleclient_tracer_otel:0.16.0 - http://github.com/prometheus/client_java/simpleclient_tracer/simpleclient_tracer_otel)
+      (The Apache Software License, Version 2.0) Prometheus Java Span Context Supplier - OpenTelemetry Agent (io.prometheus:simpleclient_tracer_otel_agent:0.16.0 - http://github.com/prometheus/client_java/simpleclient_tracer/simpleclient_tracer_otel_agent)
+-     (The Apache Software License, Version 2.0) Quarkus - JUnit 4 Mock (io.quarkus:quarkus-junit4-mock:3.8.5 - https://github.com/quarkusio/quarkus)
+-     (The Apache Software License, Version 2.0) Termd Core (io.termd:termd-core:1.1.10 - http://termd.io/)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Auth Common (io.vertx:vertx-auth-common:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-auth-parent/vertx-auth-common)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Auth JWT (io.vertx:vertx-auth-jwt:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-auth-parent/vertx-auth-jwt)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Auth OAuth2 (io.vertx:vertx-auth-oauth2:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-auth-parent/vertx-auth-oauth2)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Bridge Common (io.vertx:vertx-bridge-common:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-bridge-common)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Circuit Breaker (io.vertx:vertx-circuit-breaker:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-circuit-breaker)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Codegen (io.vertx:vertx-codegen:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-codegen)
+-     (Apache License, Version 2.0) Vert.x Config (io.vertx:vertx-config:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-config-parent/vertx-config)
+-     (Eclipse Public License - v 2.0) (The Apache Software License, Version 2.0) Vert.x Core (io.vertx:vertx-core:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-core)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Health Checks (io.vertx:vertx-health-check:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-health-check)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x JSON Schema (io.vertx:vertx-json-schema:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-json-schema)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x JUnit 5 support :: Core (io.vertx:vertx-junit5:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-junit5)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x for Kotlin (io.vertx:vertx-lang-kotlin:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-lang-kotlin-parent/vertx-lang-kotlin)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x for Kotlin coroutines (io.vertx:vertx-lang-kotlin-coroutines:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-lang-kotlin-parent/vertx-lang-kotlin-coroutines)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x metrics implementation for Micrometer.io (io.vertx:vertx-micrometer-metrics:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-micrometer-metrics)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x OpenAPI (io.vertx:vertx-openapi:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-openapi)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x OpenTelemetry (io.vertx:vertx-opentelemetry:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-tracing-parent/vertx-opentelemetry)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Service Proxy (io.vertx:vertx-service-proxy:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-service-proxy)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Shell (io.vertx:vertx-shell:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-shell)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x URI Template (io.vertx:vertx-uri-template:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-uri-template)
+-     (Eclipse Public License - v 2.0) (The Apache Software License, Version 2.0) Vert.x Web (io.vertx:vertx-web:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Web Client (io.vertx:vertx-web-client:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web-client)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Web Common (io.vertx:vertx-web-common:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web-common)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Web OpenAPI (io.vertx:vertx-web-openapi:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web-openapi)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Web OpenAPI Router (io.vertx:vertx-web-openapi-router:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web-openapi-router)
+-     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Web Validation (io.vertx:vertx-web-validation:4.5.21 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web-validation)
+-     (EDL 1.0) Jakarta Activation API (jakarta.activation:jakarta.activation-api:2.1.0 - https://github.com/eclipse-ee4j/jaf)
++     (The Apache Software License, Version 2.0) Quarkus - JUnit 4 Mock (io.quarkus:quarkus-junit4-mock:3.28.1 - https://github.com/quarkusio/quarkus)
++     (The Apache Software License, Version 2.0) Termd Core (io.termd:termd-core:1.1.11 - http://termd.io/)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Auth Common (io.vertx:vertx-auth-common:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-auth-parent/vertx-auth-common)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Auth JWT (io.vertx:vertx-auth-jwt:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-auth-parent/vertx-auth-jwt)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Auth OAuth2 (io.vertx:vertx-auth-oauth2:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-auth-parent/vertx-auth-oauth2)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Bridge Common (io.vertx:vertx-bridge-common:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-bridge-common)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Circuit Breaker (io.vertx:vertx-circuit-breaker:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-circuit-breaker)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Codegen (io.vertx:vertx-codegen:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-codegen)
++     (Apache License, Version 2.0) Vert.x Config (io.vertx:vertx-config:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-config-parent/vertx-config)
++     (Eclipse Public License - v 2.0) (The Apache Software License, Version 2.0) Vert.x Core (io.vertx:vertx-core:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-core)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Health Checks (io.vertx:vertx-health-check:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-health-check)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x JSON Schema (io.vertx:vertx-json-schema:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-json-schema)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x JUnit 5 support :: Core (io.vertx:vertx-junit5:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-junit5)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x for Kotlin (io.vertx:vertx-lang-kotlin:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-lang-kotlin-parent/vertx-lang-kotlin)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x for Kotlin coroutines (io.vertx:vertx-lang-kotlin-coroutines:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-lang-kotlin-parent/vertx-lang-kotlin-coroutines)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x metrics implementation for Micrometer.io (io.vertx:vertx-micrometer-metrics:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-micrometer-metrics)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x OpenAPI (io.vertx:vertx-openapi:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-openapi)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x OpenTelemetry (io.vertx:vertx-opentelemetry:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-tracing-parent/vertx-opentelemetry)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Service Proxy (io.vertx:vertx-service-proxy:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-service-proxy)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Shell (io.vertx:vertx-shell:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-shell)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x URI Template (io.vertx:vertx-uri-template:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-uri-template)
++     (Eclipse Public License - v 2.0) (The Apache Software License, Version 2.0) Vert.x Web (io.vertx:vertx-web:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Web Client (io.vertx:vertx-web-client:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web-client)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Web Common (io.vertx:vertx-web-common:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web-common)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Web OpenAPI (io.vertx:vertx-web-openapi:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web-openapi)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Web OpenAPI Router (io.vertx:vertx-web-openapi-router:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web-openapi-router)
++     (Eclipse Public License - v 1.0) (The Apache Software License, Version 2.0) Vert.x Web Validation (io.vertx:vertx-web-validation:4.5.22 - https://github.com/vert-x3/vertx-parent/vertx-ext/vertx-ext-parent/vertx-web-parent/vertx-web-validation)
++     (EDL 1.0) Jakarta Activation API (jakarta.activation:jakarta.activation-api:2.1.3 - https://github.com/jakartaee/jaf-api)
+      (EPL 2.0) (GPL2 w/ CPE) Jakarta Annotations API (jakarta.annotation:jakarta.annotation-api:2.1.1 - https://projects.eclipse.org/projects/ee4j.ca)
+      (The Apache Software License, Version 2.0) Jakarta Dependency Injection (jakarta.inject:jakarta.inject-api:2.0.1 - https://github.com/eclipse-ee4j/injection-api)
+      (Eclipse Public License 2.0) (GNU General Public License, version 2 with the GNU Classpath Exception) Jakarta JSON Processing API (jakarta.json:jakarta.json-api:2.0.1 - https://github.com/eclipse-ee4j/jsonp)
+      (EDL 1.0) (EPL 2.0) (GPL2 w/ CPE) Jakarta Mail API (jakarta.mail:jakarta.mail-api:2.1.2 - https://projects.eclipse.org/projects/ee4j/jakarta.mail-api)
+      (Apache License 2.0) Jakarta Bean Validation API (jakarta.validation:jakarta.validation-api:3.0.2 - https://beanvalidation.org)
+      (EPL-2.0) (GPL-2.0-with-classpath-exception) Jakarta RESTful WS API (jakarta.ws.rs:jakarta.ws.rs-api:3.1.0 - https://github.com/eclipse-ee4j/jaxrs-api)
+-     (Eclipse Distribution License - v 1.0) Jakarta XML Binding API (jakarta.xml.bind:jakarta.xml.bind-api:4.0.0 - https://github.com/eclipse-ee4j/jaxb-api/jakarta.xml.bind-api)
++     (Eclipse Distribution License - v 1.0) Jakarta XML Binding API (jakarta.xml.bind:jakarta.xml.bind-api:4.0.2 - https://github.com/jakartaee/jaxb-api/jakarta.xml.bind-api)
+      (CDDL/GPLv2+CE) JavaBeans Activation Framework API jar (javax.activation:javax.activation-api:1.2.0 - http://java.net/all/javax.activation-api/)
+      (Apache License, Version 2.0) JSR107 API and SPI (javax.cache:cache-api:1.1.0 - https://github.com/jsr107/jsr107spec)
+      (CDDL 1.1) (GPL2 w/ CPE) jaxb-api (javax.xml.bind:jaxb-api:2.3.1 - https://github.com/javaee/jaxb-spec/jaxb-api)
+@@ -135,38 +137,38 @@ Lists of 258 third-party dependencies.
+      (Apache-2.0) (LGPL-2.1-or-later) Java Native Access (net.java.dev.jna:jna:5.13.0 - https://github.com/java-native-access/jna)
+      (Apache License, Version 2.0) (MIT License) Logstash Logback Encoder (net.logstash.logback:logstash-logback-encoder:8.1 - https://github.com/logfellow/logstash-logback-encoder)
+      (Mozilla Public License Version 2.0) Saxon-HE (net.sf.saxon:Saxon-HE:12.8 - http://www.saxonica.com/)
+-     (Apache License, Version 2.0) HASMAC JSON-LD 1.1 (no.hasmac:hasmac-json-ld:0.9.0 - https://github.com/HASMAC-AS/hasmac-json-ld)
++     (Apache License, Version 2.0) HASMAC JSON-LD 1.1 (no.hasmac:hasmac-json-ld:0.10.1 - https://github.com/HASMAC-AS/hasmac-json-ld)
+      (Apache-2.0) Apache Commons Collections (org.apache.commons:commons-collections4:4.5.0 - https://commons.apache.org/proper/commons-collections/)
+      (Apache-2.0) Apache Commons Compress (org.apache.commons:commons-compress:1.24.0 - https://commons.apache.org/proper/commons-compress/)
+-     (Apache-2.0) Apache Commons CSV (org.apache.commons:commons-csv:1.14.0 - https://commons.apache.org/proper/commons-csv/)
+-     (Apache-2.0) Apache Commons Lang (org.apache.commons:commons-lang3:3.18.0 - https://commons.apache.org/proper/commons-lang/)
++     (Apache-2.0) Apache Commons CSV (org.apache.commons:commons-csv:1.14.1 - https://commons.apache.org/proper/commons-csv/)
++     (Apache-2.0) Apache Commons Lang (org.apache.commons:commons-lang3:3.19.0 - https://commons.apache.org/proper/commons-lang/)
+      (Apache License, Version 2.0) Apache HttpAsyncClient (org.apache.httpcomponents:httpasyncclient:4.1.5 - http://hc.apache.org/httpcomponents-asyncclient)
+      (Apache License, Version 2.0) Apache HttpClient (org.apache.httpcomponents:httpclient:4.5.14 - http://hc.apache.org/httpcomponents-client-ga)
+      (Apache License, Version 2.0) Apache HttpClient Cache (org.apache.httpcomponents:httpclient-cache:4.5.14 - http://hc.apache.org/httpcomponents-client-ga)
+-     (Apache License, Version 2.0) Apache HttpCore (org.apache.httpcomponents:httpcore:4.4.16 - http://hc.apache.org/httpcomponents-core-ga)
+-     (Apache License, Version 2.0) Apache HttpCore NIO (org.apache.httpcomponents:httpcore-nio:4.4.16 - http://hc.apache.org/httpcomponents-core-ga)
++     (Apache License, Version 2.0) Apache HttpCore (org.apache.httpcomponents:httpcore:4.4.13 - http://hc.apache.org/httpcomponents-core-ga)
++     (Apache License, Version 2.0) Apache HttpCore NIO (org.apache.httpcomponents:httpcore-nio:4.4.13 - http://hc.apache.org/httpcomponents-core-ga)
+      (Apache License, Version 2.0) Apache James :: Mime4j :: Core (org.apache.james:apache-mime4j-core:0.8.11 - http://james.apache.org/mime4j/apache-mime4j-core)
+      (Apache License, Version 2.0) Apache James :: Mime4j :: DOM (org.apache.james:apache-mime4j-dom:0.8.11 - http://james.apache.org/mime4j/apache-mime4j-dom)
+      (Apache License, Version 2.0) Apache James :: Mime4j :: Storage (org.apache.james:apache-mime4j-storage:0.8.11 - http://james.apache.org/mime4j/apache-mime4j-storage)
+-     (The Apache Software License, Version 2.0) Apache Jena - Libraries POM (org.apache.jena:apache-jena-libs:5.5.0 - https://jena.apache.org/apache-jena-libs/)
+-     (The Apache Software License, Version 2.0) Apache Jena - ARQ (org.apache.jena:jena-arq:5.5.0 - https://jena.apache.org/jena-arq/)
+-     (The Apache Software License, Version 2.0) Apache Jena - Base (org.apache.jena:jena-base:5.5.0 - https://jena.apache.org/jena-base/)
+-     (The Apache Software License, Version 2.0) Apache Jena - Core (org.apache.jena:jena-core:5.5.0 - https://jena.apache.org/jena-core/)
+-     (Apache License 2.0) Apache Jena - DBOE Base (org.apache.jena:jena-dboe-base:5.5.0 - https://jena.apache.org/jena-dboe-base/)
+-     (Apache License 2.0) Apache Jena - DBOE Indexes (org.apache.jena:jena-dboe-index:5.5.0 - https://jena.apache.org/jena-dboe-index/)
+-     (Apache License 2.0) Apache Jena - DBOE Storage (org.apache.jena:jena-dboe-storage:5.5.0 - https://jena.apache.org/jena-dboe-storage/)
+-     (Apache License 2.0) Apache Jena - DBOE Transactional Datastructures (org.apache.jena:jena-dboe-trans-data:5.5.0 - https://jena.apache.org/jena-dboe-trans-data/)
+-     (Apache License 2.0) Apache Jena - DBOE Transactions (org.apache.jena:jena-dboe-transaction:5.5.0 - https://jena.apache.org/jena-dboe-transaction/)
+-     (The Apache Software License, Version 2.0) Apache Jena - IRI (org.apache.jena:jena-iri:5.5.0 - https://jena.apache.org/jena-iri/)
+-     (The Apache Software License, Version 2.0) Apache Jena - IRI3986 (org.apache.jena:jena-iri3986:5.5.0 - https://jena.apache.org/jena-iri3986/)
+-     (The Apache Software License, Version 2.0) Apache Jena - Language tags (org.apache.jena:jena-langtag:5.5.0 - https://jena.apache.org/jena-langtag/)
+-     (The Apache Software License, Version 2.0) Apache Jena - ONTAPI (org.apache.jena:jena-ontapi:5.5.0 - https://jena.apache.org/jena-ontapi/)
+-     (Apache 2.0 License) Apache Jena - RDF Connection (org.apache.jena:jena-rdfconnection:5.5.0 - https://jena.apache.org/jena-rdfconnection/)
+-     (The Apache Software License, Version 2.0) Apache Jena - RDF Patch (org.apache.jena:jena-rdfpatch:5.5.0 - https://jena.apache.org/jena-rdfpatch/)
+-     (The Apache Software License, Version 2.0) Apache Jena - SHACL (org.apache.jena:jena-shacl:5.5.0 - https://jena.apache.org/jena-shacl/)
+-     (The Apache Software License, Version 2.0) Apache Jena - ShEx (org.apache.jena:jena-shex:5.5.0 - https://jena.apache.org/jena-shex/)
+-     (The Apache Software License, Version 2.0) Apache Jena - TDB1 (Native Triple Store) (org.apache.jena:jena-tdb1:5.5.0 - https://jena.apache.org/jena-tdb1/)
+-     (The Apache Software License, Version 2.0) Apache Jena - TDB2 (Native Triple Store) (org.apache.jena:jena-tdb2:5.5.0 - https://jena.apache.org/jena-tdb2/)
++     (The Apache Software License, Version 2.0) Apache Jena - Libraries POM (org.apache.jena:apache-jena-libs:5.6.0 - https://jena.apache.org/apache-jena-libs/)
++     (The Apache Software License, Version 2.0) Apache Jena - ARQ (org.apache.jena:jena-arq:5.6.0 - https://jena.apache.org/jena-arq/)
++     (The Apache Software License, Version 2.0) Apache Jena - Base (org.apache.jena:jena-base:5.6.0 - https://jena.apache.org/jena-base/)
++     (The Apache Software License, Version 2.0) Apache Jena - Core (org.apache.jena:jena-core:5.6.0 - https://jena.apache.org/jena-core/)
++     (Apache License 2.0) Apache Jena - DBOE Base (org.apache.jena:jena-dboe-base:5.6.0 - https://jena.apache.org/jena-dboe-base/)
++     (Apache License 2.0) Apache Jena - DBOE Indexes (org.apache.jena:jena-dboe-index:5.6.0 - https://jena.apache.org/jena-dboe-index/)
++     (Apache License 2.0) Apache Jena - DBOE Storage (org.apache.jena:jena-dboe-storage:5.6.0 - https://jena.apache.org/jena-dboe-storage/)
++     (Apache License 2.0) Apache Jena - DBOE Transactional Datastructures (org.apache.jena:jena-dboe-trans-data:5.6.0 - https://jena.apache.org/jena-dboe-trans-data/)
++     (Apache License 2.0) Apache Jena - DBOE Transactions (org.apache.jena:jena-dboe-transaction:5.6.0 - https://jena.apache.org/jena-dboe-transaction/)
++     (The Apache Software License, Version 2.0) Apache Jena - IRI (org.apache.jena:jena-iri:5.6.0 - https://jena.apache.org/jena-iri/)
++     (The Apache Software License, Version 2.0) Apache Jena - IRI3986 (org.apache.jena:jena-iri3986:5.6.0 - https://jena.apache.org/jena-iri3986/)
++     (The Apache Software License, Version 2.0) Apache Jena - Language tags (org.apache.jena:jena-langtag:5.6.0 - https://jena.apache.org/jena-langtag/)
++     (The Apache Software License, Version 2.0) Apache Jena - ONTAPI (org.apache.jena:jena-ontapi:5.6.0 - https://jena.apache.org/jena-ontapi/)
++     (Apache 2.0 License) Apache Jena - RDF Connection (org.apache.jena:jena-rdfconnection:5.6.0 - https://jena.apache.org/jena-rdfconnection/)
++     (The Apache Software License, Version 2.0) Apache Jena - RDF Patch (org.apache.jena:jena-rdfpatch:5.6.0 - https://jena.apache.org/jena-rdfpatch/)
++     (The Apache Software License, Version 2.0) Apache Jena - SHACL (org.apache.jena:jena-shacl:5.6.0 - https://jena.apache.org/jena-shacl/)
++     (The Apache Software License, Version 2.0) Apache Jena - ShEx (org.apache.jena:jena-shex:5.6.0 - https://jena.apache.org/jena-shex/)
++     (The Apache Software License, Version 2.0) Apache Jena - TDB1 (Native Triple Store) (org.apache.jena:jena-tdb1:5.6.0 - https://jena.apache.org/jena-tdb1/)
++     (The Apache Software License, Version 2.0) Apache Jena - TDB2 (Native Triple Store) (org.apache.jena:jena-tdb2:5.6.0 - https://jena.apache.org/jena-tdb2/)
+      (Apache License, Version 2.0) Apache Log4j API (org.apache.logging.log4j:log4j-api:2.17.1 - https://logging.apache.org/log4j/2.x/log4j-api/)
+      (Apache License, Version 2.0) Apache Log4j to SLF4J Adapter (org.apache.logging.log4j:log4j-to-slf4j:2.20.0 - https://logging.apache.org/log4j/2.x/log4j-to-slf4j/)
+      (Apache-2.0) Apache Mina SSHD :: Common support utilities (org.apache.sshd:sshd-common:2.14.0 - https://www.apache.org/sshd/sshd-common/)
+@@ -180,26 +182,26 @@ Lists of 258 third-party dependencies.
+      (EDL 1.0) (EPL 2.0) (GPL2 w/ CPE) Angus Mail Provider (org.eclipse.angus:angus-mail:1.0.0 - http://eclipse-ee4j.github.io/mail/angus-mail)
+      (Apache License, Version 2.0) MicroProfile OpenAPI API (org.eclipse.microprofile.openapi:microprofile-openapi-api:3.1.1 - http://microprofile.io/microprofile-openapi-parent/microprofile-openapi-api)
+      (Eclipse Public License 2.0) (GNU General Public License, version 2 with the GNU Classpath Exception) Eclipse Parsson (org.eclipse.parsson:parsson:1.0.5 - https://github.com/eclipse-ee4j/parsson/parsson)
+-     (Eclipse Distribution License v1.0) RDF4J: common annotation (org.eclipse.rdf4j:rdf4j-common-annotation:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-annotation/)
+-     (Eclipse Distribution License v1.0) RDF4J: common exception (org.eclipse.rdf4j:rdf4j-common-exception:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-exception/)
+-     (Eclipse Distribution License v1.0) RDF4J: common IO (org.eclipse.rdf4j:rdf4j-common-io:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-io/)
+-     (Eclipse Distribution License v1.0) RDF4J: common iterators (org.eclipse.rdf4j:rdf4j-common-iterator:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-iterator/)
+-     (Eclipse Distribution License v1.0) RDF4J: common order (org.eclipse.rdf4j:rdf4j-common-order:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-order/)
+-     (Eclipse Distribution License v1.0) RDF4J: common text (org.eclipse.rdf4j:rdf4j-common-text:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-text/)
+-     (Eclipse Distribution License v1.0) RDF4J: common XML (org.eclipse.rdf4j:rdf4j-common-xml:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-xml/)
+-     (Eclipse Distribution License v1.0) RDF4J: Model (org.eclipse.rdf4j:rdf4j-model:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-model/)
+-     (Eclipse Distribution License v1.0) RDF4J: Model API (org.eclipse.rdf4j:rdf4j-model-api:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-model-api/)
+-     (Eclipse Distribution License v1.0) RDF4J: RDF Vocabularies (org.eclipse.rdf4j:rdf4j-model-vocabulary:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-model-vocabulary/)
+-     (Eclipse Distribution License v1.0) RDF4J: Rio - API (org.eclipse.rdf4j:rdf4j-rio-api:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-api/)
+-     (Eclipse Distribution License v1.0) RDF4J: Rio - Datatypes (org.eclipse.rdf4j:rdf4j-rio-datatypes:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-datatypes/)
+-     (Eclipse Distribution License v1.0) RDF4J: Rio - JSON-LD (org.eclipse.rdf4j:rdf4j-rio-jsonld:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-jsonld/)
+-     (Eclipse Distribution License v1.0) RDF4J: Rio - Languages (org.eclipse.rdf4j:rdf4j-rio-languages:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-languages/)
+-     (Eclipse Distribution License v1.0) RDF4J: Rio - N3 (writer-only) (org.eclipse.rdf4j:rdf4j-rio-n3:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-n3/)
+-     (Eclipse Distribution License v1.0) RDF4J: Rio - N-Triples (org.eclipse.rdf4j:rdf4j-rio-ntriples:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-ntriples/)
+-     (Eclipse Distribution License v1.0) RDF4J: Rio - RDF/XML (org.eclipse.rdf4j:rdf4j-rio-rdfxml:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-rdfxml/)
+-     (Eclipse Distribution License v1.0) RDF4J: Rio - Turtle (org.eclipse.rdf4j:rdf4j-rio-turtle:5.1.3 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-turtle/)
++     (Eclipse Distribution License v1.0) RDF4J: common annotation (org.eclipse.rdf4j:rdf4j-common-annotation:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-annotation/)
++     (Eclipse Distribution License v1.0) RDF4J: common exception (org.eclipse.rdf4j:rdf4j-common-exception:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-exception/)
++     (Eclipse Distribution License v1.0) RDF4J: common IO (org.eclipse.rdf4j:rdf4j-common-io:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-io/)
++     (Eclipse Distribution License v1.0) RDF4J: common iterators (org.eclipse.rdf4j:rdf4j-common-iterator:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-iterator/)
++     (Eclipse Distribution License v1.0) RDF4J: common order (org.eclipse.rdf4j:rdf4j-common-order:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-order/)
++     (Eclipse Distribution License v1.0) RDF4J: common text (org.eclipse.rdf4j:rdf4j-common-text:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-text/)
++     (Eclipse Distribution License v1.0) RDF4J: common XML (org.eclipse.rdf4j:rdf4j-common-xml:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-common/rdf4j-common-xml/)
++     (Eclipse Distribution License v1.0) RDF4J: Model (org.eclipse.rdf4j:rdf4j-model:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-model/)
++     (Eclipse Distribution License v1.0) RDF4J: Model API (org.eclipse.rdf4j:rdf4j-model-api:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-model-api/)
++     (Eclipse Distribution License v1.0) RDF4J: RDF Vocabularies (org.eclipse.rdf4j:rdf4j-model-vocabulary:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-model-vocabulary/)
++     (Eclipse Distribution License v1.0) RDF4J: Rio - API (org.eclipse.rdf4j:rdf4j-rio-api:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-api/)
++     (Eclipse Distribution License v1.0) RDF4J: Rio - Datatypes (org.eclipse.rdf4j:rdf4j-rio-datatypes:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-datatypes/)
++     (Eclipse Distribution License v1.0) RDF4J: Rio - JSON-LD (org.eclipse.rdf4j:rdf4j-rio-jsonld:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-jsonld/)
++     (Eclipse Distribution License v1.0) RDF4J: Rio - Languages (org.eclipse.rdf4j:rdf4j-rio-languages:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-languages/)
++     (Eclipse Distribution License v1.0) RDF4J: Rio - N3 (writer-only) (org.eclipse.rdf4j:rdf4j-rio-n3:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-n3/)
++     (Eclipse Distribution License v1.0) RDF4J: Rio - N-Triples (org.eclipse.rdf4j:rdf4j-rio-ntriples:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-ntriples/)
++     (Eclipse Distribution License v1.0) RDF4J: Rio - RDF/XML (org.eclipse.rdf4j:rdf4j-rio-rdfxml:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-rdfxml/)
++     (Eclipse Distribution License v1.0) RDF4J: Rio - Turtle (org.eclipse.rdf4j:rdf4j-rio-turtle:5.2.0 - https://rdf4j.org/rdf4j-core/rdf4j-rio/rdf4j-rio-turtle/)
+      (The Apache Software License, Version 2.0) Ehcache (org.ehcache:ehcache:3.10.8 - http://ehcache.org)
+-     (The Apache Software License, Version 2.0) rest (org.elasticsearch.client:elasticsearch-rest-client:8.18.0 - https://github.com/elastic/elasticsearch)
++     (The Apache Software License, Version 2.0) rest (org.elasticsearch.client:elasticsearch-rest-client:8.17.0 - https://github.com/elastic/elasticsearch)
+      (Eclipse Public License 2.0) (GNU General Public License, version 2 with the GNU Classpath Exception) JSON-P Default Provider (org.glassfish:jakarta.json:2.0.1 - https://github.com/eclipse-ee4j/jsonp)
+      (Eclipse Distribution License - v 1.0) Codemodel Core (org.glassfish.jaxb:codemodel:4.0.3 - https://eclipse-ee4j.github.io/jaxb-ri/)
+      (Eclipse Distribution License - v 1.0) JAXB Core (org.glassfish.jaxb:jaxb-core:4.0.3 - https://eclipse-ee4j.github.io/jaxb-ri/)
+@@ -220,9 +222,9 @@ Lists of 258 third-party dependencies.
+      (Apache License 2.0) RESTEasy Jackson 2 Provider (org.jboss.resteasy:resteasy-jackson2-provider:6.2.9.Final - https://resteasy.dev)
+      (Apache License 2.0) RESTEasy JAXB Provider (org.jboss.resteasy:resteasy-jaxb-provider:6.2.9.Final - https://resteasy.dev)
+      (Apache License 2.0) RESTEasy Multipart Provider (org.jboss.resteasy:resteasy-multipart-provider:6.2.9.Final - https://resteasy.dev)
+-     (Apache License, Version 2.0) ShrinkWrap API (org.jboss.shrinkwrap:shrinkwrap-api:1.2.6 - http://www.jboss.org/shrinkwrap-api)
+-     (Apache License, Version 2.0) ShrinkWrap Implementation Base (org.jboss.shrinkwrap:shrinkwrap-impl-base:1.2.6 - http://www.jboss.org/shrinkwrap-impl-base)
+-     (Apache License, Version 2.0) ShrinkWrap SPI (org.jboss.shrinkwrap:shrinkwrap-spi:1.2.6 - http://www.jboss.org/shrinkwrap-spi)
++     (Apache License, Version 2.0) ShrinkWrap API (org.jboss.shrinkwrap:shrinkwrap-api:2.0.0-beta-2 - http://arquillian.org/modules/shrinkwrap-shrinkwrap/shrinkwrap-api/)
++     (Apache License, Version 2.0) ShrinkWrap Implementation Base (org.jboss.shrinkwrap:shrinkwrap-impl-base:2.0.0-beta-2 - http://arquillian.org/modules/shrinkwrap-shrinkwrap/shrinkwrap-impl-base/)
++     (Apache License, Version 2.0) ShrinkWrap SPI (org.jboss.shrinkwrap:shrinkwrap-spi:2.0.0-beta-2 - http://arquillian.org/modules/shrinkwrap-shrinkwrap/shrinkwrap-spi/)
+      (The Apache Software License, Version 2.0) IntelliJ IDEA Annotations (org.jetbrains:annotations:13.0 - http://www.jetbrains.org)
+      (The Apache License, Version 2.0) Kotlin Reflect (org.jetbrains.kotlin:kotlin-reflect:1.6.21 - https://kotlinlang.org/)
+      (The Apache License, Version 2.0) Kotlin Stdlib (org.jetbrains.kotlin:kotlin-stdlib:2.1.0 - https://kotlinlang.org/)
+@@ -237,10 +239,10 @@ Lists of 258 third-party dependencies.
+      (Eclipse Public License v2.0) JUnit Jupiter Params (org.junit.jupiter:junit-jupiter-params:5.8.2 - https://junit.org/junit5/)
+      (Eclipse Public License v2.0) JUnit Platform Commons (org.junit.platform:junit-platform-commons:1.8.2 - https://junit.org/junit5/)
+      (Eclipse Public License v2.0) JUnit Platform Engine API (org.junit.platform:junit-platform-engine:1.8.2 - https://junit.org/junit5/)
+-     (Apache License, Version 2.0) Keycloak Admin REST Client (org.keycloak:keycloak-admin-client:26.0.4 - https://keycloak.org/keycloak-admin-client)
+-     (Apache License, Version 2.0) Keycloak Client Common Synced (org.keycloak:keycloak-client-common-synced:26.0.4 - https://keycloak.org/keycloak-client-common-synced)
++     (Apache License, Version 2.0) Keycloak Admin REST Client (org.keycloak:keycloak-admin-client:26.0.7 - https://keycloak.org/keycloak-admin-client)
++     (Apache License, Version 2.0) Keycloak Client Common Synced (org.keycloak:keycloak-client-common-synced:26.0.7 - https://keycloak.org/keycloak-client-common-synced)
+      (Public Domain, per Creative Commons CC0) LatencyUtils (org.latencyutils:LatencyUtils:2.0.3 - http://latencyutils.github.io/LatencyUtils/)
+-     (Eclipse Distribution License - v 1.0) (Eclipse Public License, Version 2.0) org.locationtech.jts:jts-core (org.locationtech.jts:jts-core:1.19.0 - https://www.locationtech.org/projects/technology.jts/jts-modules/jts-core)
++     (Eclipse Distribution License - v 1.0) (Eclipse Public License, Version 2.0) org.locationtech.jts:jts-core (org.locationtech.jts:jts-core:1.20.0 - https://www.locationtech.org/projects/technology.jts/jts-modules/jts-core)
+      (Eclipse Distribution License - v 1.0) (Eclipse Public License, Version 2.0) org.locationtech.jts.io:jts-io-common (org.locationtech.jts.io:jts-io-common:1.20.0 - https://www.locationtech.org/projects/technology.jts/jts-modules/jts-io/jts-io-common)
+      (The Apache Software License, Version 2.0) Spatial4J (org.locationtech.spatial4j:spatial4j:0.8 - https://projects.eclipse.org/projects/locationtech.spatial4j)
+      (MIT) mockito-core (org.mockito:mockito-core:5.12.0 - https://github.com/mockito/mockito)
