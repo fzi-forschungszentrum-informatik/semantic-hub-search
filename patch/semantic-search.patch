@@ -9,23 +9,36 @@ index 62238fa3..88c9e792 100644
 +Makefile
 +INSIGHTS.md
 \ No newline at end of file
+diff --git a/Dockerfile b/Dockerfile
+index 8d18b93a..aa0515b4 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -5,6 +5,8 @@ ENV VERTICLE_FILE search.jar
+ # Set the location of the verticles
+ ENV VERTICLE_HOME /usr/verticles
+ ENV SITEMAPS_HOME /usr/verticles/sitemaps
++ENV PIVEAU_LOG_LEVEL=DEBUG
++ENV OTEL_SDK_DISABLED=true
+ 
+ # Set the location of the config file
+ ARG CONFIG_FILE=config.sample.json
 diff --git a/SEMANTIC-SEARCH.md b/SEMANTIC-SEARCH.md
 new file mode 100644
-index 00000000..3048b4e7
+index 00000000..90d95674
 --- /dev/null
 +++ b/SEMANTIC-SEARCH.md
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,128 @@
 +# Semantic Search in Piveau Hub Search
 +
 +This document describes the implementation of semantic search features in piveau-hub-search, including dataset enrichment with embeddings and hybrid search capabilities.
 +
 +## Overview
 +
-+Semantic search enhances traditional keyword-based search by understanding the intent and contextual meaning of search queries. In this implementation, we use vector embeddings to represent both documents (datasets) and search queries in the same high-dimensional space, allowing for similarity-based retrieval.
++Semantic search enhances traditional keyword-based search by understanding the intent and contextual meaning of search queries. In this implementation, we use vector embeddings to represent both documents (DCAT datasets) and search queries in the same high-dimensional space, allowing for similarity-based retrieval.
 +
 +The core components of the semantic search feature are:
 +- **Embedding Service**: A service to generate vector representations from text.
-+- **Dataset Enrichment**: Automatically generating and storing embeddings for datasets.
++- **Dataset Enrichment**: Automatically generating and storing embeddings for DCAT datasets.
 +- **Hybrid Search**: Combining traditional BM25 full-text search with k-nearest neighbors (kNN) vector search.
 +
 +---
@@ -43,10 +56,11 @@ index 00000000..3048b4e7
 +    - **Extraction Logic**: The service extracts text from `title`, `description`, and `keywords` dataset fields. For multilingual fields, it prioritizes languages in the order: `_lang` (original), `de`, `en`. For keywords, it collects all non-blank `label` values.
 +
 +### 2. Dataset Enrichment
-+To enable semantic search, datasets must be enriched with vector embeddings during harvesting or via a reindexing process that needs to be triggered manually.
++To enable semantic search, DCAT datasets must be enriched with vector embeddings. 
 +
-+- **Automatic Enrichment**: Integrated into `createOrUpdateDataset` and `createOrUpdateDatasetBulk` in `DatasetsServiceImpl.java`.
-+- **Reindexing**: A dedicated method `triggerReindexingWithEmbeddings` allows for enriching all existing datasets in the Elasticsearch index.
++- **Manual Enrichment (Bulk)**: A dedicated background job can be triggered to enrich all existing DCAT datasets in the Elasticsearch index. This is the recommended way to generate embeddings.
++- **Automatic Enrichment**: Note that automatic enrichment during individual dataset creation or updates is currently **disabled** in the code due to high AI model pressure and related timeout problems.
++- **Triggering Enrichment**: Use the `triggerDatasetEmbeddingEnrichment` command in the service shell or send an authorized POST request to `/bulk/datasets/embeddings`. 
 +- **Fields**: The service currently targets the following fields to build the embedding context:
 +    - `title`: Extracted using language priority (`_lang`, `de`, `en`).
 +    - `description`: Extracted using language priority (`_lang`, `de`, `en`).
@@ -55,17 +69,19 @@ index 00000000..3048b4e7
 +### 3. Hybrid Search
 +Hybrid search combines the strengths of keyword matching and semantic cosinus-similarity.
 +
-+- **Implementation**: Located in `ElasticsearchSearchClientImpl.java` within the `search` method logic for datasets.
-+- **Logic**: It executes a query in Elasticsearch that combines a standard full-text search query with a k-nearest neighbors (kNN) vector search query.
-+- **Fields**: Semantic matching is performed on specific embedding fields (`title_embedding`, `description_embedding`, `keywords_embedding`) if available.
-+- **Scoring**: The scores from both methods are combined. A `min_score` can be configured to filter out low-relevance semantic matches in method `buildHybridDatasetSearchRequest`.
++- **Implementation**: The core logic is integrated into `SearchRequestBuilder.buildHybridSearchRequest`.
++- **Logic**: It combines a semantic query (using `ScriptScoreQuery` and `cosineSimilarity`) with a standard lexical query. This integration ensures that all standard search features like sorting, facets, and filters are also applied to hybrid searches.
++- **Fields**: Semantic matching is performed on embedding fields (`title_embedding`, `description_embedding`, `keywords_embedding`).
++- **Scoring**: Scores from both semantic and lexical methods are combined. A `min_score` and `boost` are applied to the semantic part to ensure relevance.
 +
 +### 4. API Integration
-+The semantic search functionality is exposed via the standard piveau-hub-search endpoint.
++The semantic search functionality and its management are exposed via the piveau-hub-search API.
 +
-+- **Endpoint**: `/search` (e.g., `https://example.org/api/hub/search/search`)
++- **Search Endpoint**: `/search` (e.g., `https://localhost:8084/search?q=weather&semanticSearch=true`)
 +- **Parameter**: `semanticSearch` (boolean, default: true).
-+  If enabled, the search service generates an embedding for the query string `q` and performs a hybrid search. If disabled, the search is performed as a standard full-text search.  Enabled by default to ensure backward compatibility with existing clients. 
++  If enabled, the search service generates an embedding for the query string `q` and performs a hybrid search. If disabled, the search is performed as a standard full-text search.  Enabled by default to ensure backward compatibility with existing clients, e.g. with Web-UI. 
++- **Bulk Enrichment Endpoint**: `/bulk/datasets/embeddings` (POST)
++  Triggers a background process to enrich all datasets with embeddings. Requires authentication.
 +- **OpenAPI**: Updated and specified in `src/main/resources/webroot/openapi.yaml`.
 +
 +---
@@ -91,7 +107,7 @@ index 00000000..3048b4e7
 +docker-compose up -d
 +```
 +
-+This will start Elasticsearch (for storage and vector search) and Ollama (for embedding generation). Inject harvested datasets into Elasticsearch, e.g. by using the `piveau-hub-harvester` or restoring from a backup e.g. via tools like `elasticdump`.
++This will start Elasticsearch (for storage and vector search) and Ollama (for embedding generation). Inject harvested DCAT datasets into Elasticsearch, e.g. by using the piveau-hub harvesting pipeline or restoring from a backup e.g. via tools like `elasticdump`.
 +
 +### 2. Build the Service
 +Use Maven to compile and package the service into a runnable JAR file:
@@ -100,7 +116,17 @@ index 00000000..3048b4e7
 +mvn clean package -DskipTests
 +```
 +
-+### 3. Run the Service
++### 3. Enable Dynamic Mapping
++Setting `dynamic: true` enables dynamic mapping, allowing Elasticsearch to automatically index new embedding fields without schema modifications.
++
++```
++PUT /dataset_write/_mapping
++{
++  "dynamic": true
++}
++```
++
++### 4. Run the Service
 +Once the JAR file is generated, you can start the service using:
 +
 +```bash
@@ -112,23 +138,26 @@ index 00000000..3048b4e7
 +
 +## File Changes Summary
 +
-+| File | Description                                                                    |
-+| --- |--------------------------------------------------------------------------------|
-+| `conf/elasticsearch/mapping/dataset/standard.json` | Updated Elasticsearch mapping to include the `embedding` field (dense_vector). |
-+| `src/main/java/io/piveau/hub/search/MainVerticle.java` | Registration and initialization of the `EmbeddingService`.                     |
-+| `src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java` | Implemented hybrid kNN + full-text query logic.                                |
-+| `src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java` | Integrated enrichment logic and reindexing function.                           |
-+| `src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingService.java` | Interface for the embedding service.                                           |
-+| `src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceImpl.java` | Implementation of embedding generation and dataset enrichment.                 |
-+| `src/main/java/io/piveau/hub/search/services/search/SearchServiceImpl.java` | Orchestrates query enrichment and search execution.                            |
-+| `src/main/java/io/piveau/hub/search/util/request/QueryParams.java` | Added support for `queryVector` and `semanticSearch` flag.                     |
-+| `src/main/resources/webroot/openapi.yaml` | Added `semanticSearch` parameter to the `/search` endpoint.                    |
-+| `src/test/java/io/piveau/hub/search/services/datasets/DatasetsServiceTest.java` | Tests for embedding generation during reindexing and bulk indexing.            |
-+| `src/test/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceTest.java` | Unit tests for embedding generation and dataset enrichment logic.              |
-+| `src/test/java/io/piveau/hub/search/IntegrationTest/HybridDatasetSearchIntegrationTest.java` | Integration tests for the hybrid search functionality.                         |
-+| `docker-compose.yaml` | Added Ollama service for local embedding generation.                           |
++| File | Description                                                                               |
++| --- |-------------------------------------------------------------------------------------------|
++| `conf/elasticsearch/mapping/dataset/standard.json` | Updated Elasticsearch mapping to include the `embedding` field (dense_vector).            |
++| `src/main/java/io/piveau/hub/search/MainVerticle.java` | Registration and initialization of the `EmbeddingService`.                                |
++| `src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java` | Coordinates search requests and identifies when to use hybrid search.                     |
++| `src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/SearchRequestBuilder.java` | Implements the hybrid query integrating semantic search with standard full-text features. |
++| `src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java` | Integrated enrichment logic and reindexing function.                                      |
++| `src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingService.java` | Interface for the embedding service.                                                      |
++| `src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceImpl.java` | Implementation of embedding generation and dataset enrichment.                            |
++| `src/main/java/io/piveau/hub/search/services/search/SearchServiceImpl.java` | Orchestrates query enrichment and search execution.                                       |
++| `src/main/java/io/piveau/hub/search/util/request/QueryParams.java` | Support for `queryVector` and `semanticSearch` flag.                                      |
++| `src/main/java/io/piveau/hub/search/handler/DatasetHandler.java` | Handler for triggering bulk embedding enrichment.                                         |
++| `src/main/java/io/piveau/hub/search/shell/ShellVerticle.java` | Support for `triggerDatasetEmbeddingEnrichment` command.                                  |
++| `src/main/resources/webroot/openapi.yaml` | Specification for the `/search` and `/bulk/datasets/embeddings` endpoint.                 |
++| `src/test/java/io/piveau/hub/search/services/datasets/DatasetsServiceTest.java` | Tests for embedding generation during reindexing and bulk indexing.                       |
++| `src/test/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceTest.java` | Unit tests for embedding generation and dataset enrichment logic.                         |
++| `src/test/java/io/piveau/hub/search/IntegrationTest/HybridDatasetSearchIntegrationTest.java` | Integration tests for the hybrid search functionality.                                    |
++| `docker-compose.yaml` | Added Ollama service for local embedding generation.                                      |
 diff --git a/conf/config.sample.json b/conf/config.sample.json
-index efd36ac9..43551cf9 100644
+index efd36ac9..610a3a66 100644
 --- a/conf/config.sample.json
 +++ b/conf/config.sample.json
 @@ -478,5 +478,9 @@
@@ -137,7 +166,7 @@ index efd36ac9..43551cf9 100644
      }
 +  },
 +  "PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG": {
-+    "url": "http://localhost:11434",
++    "url": "http://ollama:11434",
 +    "model": "paraphrase-multilingual"
    }
  }
@@ -171,7 +200,7 @@ index 38ffd243..00535639 100644
    }
  }
 diff --git a/docker-compose.yaml b/docker-compose.yaml
-index cad08c02..f28a4e9f 100644
+index cad08c02..fe5ee602 100644
 --- a/docker-compose.yaml
 +++ b/docker-compose.yaml
 @@ -19,3 +19,26 @@ services:
@@ -187,7 +216,7 @@ index cad08c02..f28a4e9f 100644
 +    ports:
 +      - 11434:11434
 +    volumes:
-+      - ollama:/root/.ollama
++      - ollama-data:/root/.ollama
 +    environment:
 +      - OLLAMA_KEEP_ALIVE=24h
 +    entrypoint: ["/bin/sh", "-c"]
@@ -200,7 +229,7 @@ index cad08c02..f28a4e9f 100644
 +    restart: unless-stopped
 +
 +volumes:
-+  ollama:
++  ollama-data:
 \ No newline at end of file
 diff --git a/pom.xml b/pom.xml
 index bf2240aa..06388e52 100644
@@ -303,7 +332,7 @@ index 6623042e..34356638 100644
 +    public static final String FIELD_KEYWORDS_EMBEDDING = "keywords_embedding";
  }
 diff --git a/src/main/java/io/piveau/hub/search/MainVerticle.java b/src/main/java/io/piveau/hub/search/MainVerticle.java
-index 0b4a7409..d65d5783 100644
+index 0b4a7409..63a5f676 100644
 --- a/src/main/java/io/piveau/hub/search/MainVerticle.java
 +++ b/src/main/java/io/piveau/hub/search/MainVerticle.java
 @@ -9,6 +9,7 @@ import io.piveau.hub.search.services.dataservices.DataServicesService;
@@ -330,7 +359,15 @@ index 0b4a7409..d65d5783 100644
                  .compose(this::bootstrapVerticles)
                  .compose(this::startServer)
                  .onSuccess(v -> LOG.info("Successfully launched hub-search"))
-@@ -399,6 +402,7 @@ public class MainVerticle extends AbstractVerticle {
+@@ -208,6 +211,7 @@ public class MainVerticle extends AbstractVerticle {
+         builder.operation("createDatasetRevision").handler(datasetHandler::createDatasetRevision);
+         builder.operation("readDatasetRevisionByRevisionId").handler(datasetHandler::readDatasetRevisionById);
+         builder.operation("deleteDatasetRevision").handler(datasetHandler::deleteDatasetRevision);
++        builder.operation("triggerDatasetEmbeddingEnrichment").handler(datasetHandler::triggerDatasetEmbeddingEnrichment);
+ 
+         builder.operation("listCatalogues").handler(catalogueHandler::listCatalogues);
+         builder.operation("createCatalogue").handler(catalogueHandler::createCatalogue);
+@@ -399,6 +403,7 @@ public class MainVerticle extends AbstractVerticle {
                          .add(Constants.ENV_PIVEAU_HUB_SEARCH_SERVICE_PORT)
                          .add(Constants.ENV_PIVEAU_HUB_SEARCH_API_KEY)
                          .add(Constants.ENV_PIVEAU_HUB_SEARCH_ES_CONFIG)
@@ -338,7 +375,7 @@ index 0b4a7409..d65d5783 100644
                          .add(Constants.ENV_PIVEAU_HUB_SEARCH_CLI_CONFIG)
                          .add(Constants.ENV_PIVEAU_HUB_SEARCH_GAZETTEER_CONFIG)
                          .add(Constants.ENV_PIVEAU_HUB_SEARCH_SITEMAP_CONFIG)
-@@ -458,6 +462,23 @@ public class MainVerticle extends AbstractVerticle {
+@@ -458,6 +463,23 @@ public class MainVerticle extends AbstractVerticle {
          return promise.future();
      }
  
@@ -381,7 +418,7 @@ index 9c5cbb2d..f9778ec8 100644
 -
  }
 diff --git a/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java b/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java
-index 592b1043..c632ea59 100644
+index 592b1043..932244d2 100644
 --- a/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java
 +++ b/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/ElasticsearchSearchClientImpl.java
 @@ -15,8 +15,8 @@ import co.elastic.clients.elasticsearch.core.search.TotalHits;
@@ -419,7 +456,7 @@ index 592b1043..c632ea59 100644
                  .refresh(refresh == Boolean.TRUE ? Refresh.True : Refresh.False)
                  .id(indexId)
                  .document(JsonData.fromJson(document.encode())));
-@@ -634,15 +641,175 @@ public class ElasticsearchSearchClientImpl implements SearchClient {
+@@ -634,11 +641,42 @@ public class ElasticsearchSearchClientImpl implements SearchClient {
                  });
      }
  
@@ -445,20 +482,6 @@ index 592b1043..c632ea59 100644
 +    }
 +
 +
-+    /**
-+     * Constructs a query to check if at least one of the required embedding fields for either "title", "description"
-+     * or "keywords" exists in the documents.
-+     *
-+     * @return A {@link Query} object configured to check for the existence of any one of the specified embedding fields.
-+     */
-+    private Query embeddingExistsQuery() {
-+        return BoolQuery.of(bool -> bool
-+            .should(ExistsQuery.of(exists -> exists.field("title_embedding"))._toQuery())
-+            .should(ExistsQuery.of(exists -> exists.field("description_embedding"))._toQuery())
-+            .should(ExistsQuery.of(exists -> exists.field("keywords_embedding"))._toQuery())
-+            .minimumShouldMatch("1")
-+        )._toQuery();
-+    }
 +
      @Override
      public Future<SearchResponse<JsonData>> search(QueryParams query, HeaderParams header) {
@@ -466,8 +489,10 @@ index 592b1043..c632ea59 100644
 +        SearchRequest searchRequest;
 +
 +        if (isHybridDatasetSearch(query)) {
-+            searchRequest = buildHybridDatasetSearchRequest(query, header);
++            log.info("search(): Elasticsearch search(): using hybrid search. q='{}', filters={}, semanticSearch={}", query.getQ(), query.getFilters(), query.isSemanticSearch());
++            searchRequest = SearchRequestBuilder.buildHybridSearchRequest(query, header, indexManager, operator);
 +        } else {
++            log.info("search(): Elasticsearch search(): using fulltext search. q='{}', filters={}, semanticSearch={}", query.getQ(), query.getFilters(), query.isSemanticSearch());
 +            searchRequest = Helper.isNullOrEmpty(query.getFilters()) ?
                  SearchRequestBuilder.buildSearchRequest(query, header, operator) :
                  SearchRequestBuilder.buildSearchRequest(query, header, indexManager, operator);
@@ -475,128 +500,7 @@ index 592b1043..c632ea59 100644
  
          return client.search(searchRequest);
      }
- 
-+    private SearchRequest buildHybridDatasetSearchRequest(QueryParams query, HeaderParams header) {
-+
-+        // return SearchRequestBuilder.buildSearchRequest(query, header, operator);
-+
-+        List<String> indices = query.getFilters().stream().map(Constants::getReadAlias).toList();
-+
-+        // Query No. 1: Embedding-based search with semantic boosting
-+
-+        float semanticBoost = 1.2f;
-+        float semanticMinScore = 0.75f;
-+        float effectiveSemanticMinScore = semanticMinScore * semanticBoost;
-+
-+        Map<String, JsonData> scriptParams = new HashMap<>();
-+        scriptParams.put("queryVector", JsonData.of(query.getQueryVector()));
-+        scriptParams.put("title_weight", JsonData.of(0.5f));
-+        scriptParams.put("description_weight", JsonData.of(0.3f));
-+        scriptParams.put("keywords_weight", JsonData.of(0.2f));
-+        scriptParams.put("semantic_boost", JsonData.of(semanticBoost));
-+        scriptParams.put("semantic_min_score", JsonData.of(semanticMinScore));
-+
-+        Query semanticQuery = ScriptScoreQuery.of(scriptScore -> scriptScore
-+            .query(embeddingExistsQuery())
-+            .minScore(effectiveSemanticMinScore)
-+            .script(script -> script
-+                .lang("painless") // allow only sandboxed and secure script operations
-+                .params(scriptParams)
-+                .source("""
-+                    double weighted_score = 0.0;
-+                    double weight_sum = 0.0;
-+                    
-+                    if (doc['title_embedding'].size() > 0) {
-+                        double score = (cosineSimilarity(params.queryVector, 'title_embedding') + 1.0) / 2.0;
-+                        weighted_score += score * params.title_weight;
-+                        weight_sum += params.title_weight;
-+                    }
-+
-+                    if (doc['description_embedding'].size() > 0) {
-+                        double score = (cosineSimilarity(params.queryVector, 'description_embedding') + 1.0) / 2.0;
-+                        weighted_score += score * params.description_weight;
-+                        weight_sum += params.description_weight;
-+                    }
-+
-+                    if (doc['keywords_embedding'].size() > 0) {
-+                        double score = (cosineSimilarity(params.queryVector, 'keywords_embedding') + 1.0) / 2.0;
-+                        weighted_score += score * params.keywords_weight;
-+                        weight_sum += params.keywords_weight;
-+                    }
-+                    
-+                    double semantic_score = weight_sum > 0 ? weighted_score / weight_sum : 0.0;
-+                    
-+                    if (semantic_score < params.semantic_min_score) {
-+                        return 0.0;
-+                    }
-+                    
-+                    return semantic_score * params.semantic_boost;
-+                    """)
-+            )
-+        )._toQuery();
-+
-+        // Query No. 2: Full-text search with title, description, and keywords boosting
-+
-+        Query lexicalQuery = BoolQuery.of( bool -> bool
-+            .should(MultiMatchQuery.of(multiMatch -> multiMatch
-+                .query(query.getQ())
-+                .fields("title._lang^4", "description._lang^1.2", "keywords.id^3")
-+                .type(TextQueryType.BestFields)
-+                .operator(operator)
-+                .boost(0.8f)
-+            )._toQuery())
-+            .should(MultiMatchQuery.of(multiMatch -> multiMatch
-+                .query(query.getQ())
-+                .fields("title._lang^6", "keywords.id^4")
-+                .type(TextQueryType.Phrase)
-+                .boost(1.5f)
-+            )._toQuery())
-+            .should(MultiMatchQuery.of(multiMatch -> multiMatch
-+                .query(query.getQ())
-+                .fields("title._lang^2", "description._lang", "keywords.id^2")
-+                .fuzziness("AUTO")
-+                .prefixLength(2)
-+                .boost(0.3f)
-+            )._toQuery())
-+            .minimumShouldMatch("1")
-+        )._toQuery();
-+
-+        // Combine the two queries into one hybrid query
-+
-+        Query hybridQuery = BoolQuery.of(bool -> bool
-+            .should(semanticQuery)
-+            .should(lexicalQuery)
-+            .minimumShouldMatch("1")
-+        )._toQuery();
-+
-+        SearchRequest.Builder builder = new SearchRequest.Builder()
-+            .index(indices)
-+            .from(query.getFrom())
-+            .size(query.getSize())
-+            .query(hybridQuery)
-+            .trackTotalHits(t -> t.enabled(true)); // count total hits, even if larger than search limit
-+
-+        // Filter source-fields as requested
-+
-+        if(!Helper.isNullOrEmpty(query.getIncludes())) {
-+            builder.source(source -> source
-+                .filter(filter -> filter
-+                    .includes(query.getIncludes()) ));
-+        }
-+
-+        // Filter explanation of score computation
-+
-+        if(query.isShowScore()) {
-+            builder.explain(false);
-+        }
-+
-+        return builder.build();
-+    }
-+
-     @Override
-     public Future<SearchResponse<JsonData>> searchAggregation(QueryParams query, HeaderParams header, String index) {
-         if (query.isAggregation()) {
-@@ -1000,20 +1167,22 @@ public class ElasticsearchSearchClientImpl implements SearchClient {
+@@ -1000,20 +1038,22 @@ public class ElasticsearchSearchClientImpl implements SearchClient {
  
      @Override
      public Future<Void> paginate(QueryParams query, Handler<ResponseBody<JsonData>> handler) {
@@ -633,6 +537,275 @@ index 592b1043..c632ea59 100644
          return client.search(searchRequest)
                  .compose(response -> {
                      handler.handle(response);
+@@ -1225,6 +1265,9 @@ public class ElasticsearchSearchClientImpl implements SearchClient {
+     }
+ 
+     private Future<JsonArray> scrollIds(String scrollId, boolean subdivided, JsonArray ids, boolean onlyIds) {
++        if (scrollId == null) {
++            return Future.succeededFuture(ids);
++        }
+         ScrollRequest scrollRequest = createScrollRequest(scrollId, "60s");
+ 
+         return client.scroll(scrollRequest)
+diff --git a/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/SearchQueryBuilder.java b/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/SearchQueryBuilder.java
+index 8da8ff4d..07f44f7d 100644
+--- a/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/SearchQueryBuilder.java
++++ b/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/SearchQueryBuilder.java
+@@ -173,7 +173,7 @@ public class SearchQueryBuilder {
+         return metaData;
+     }
+ 
+-    private static Query buildQQuery(String queryQ, boolean isQueryAutocomplete,
++    public static Query buildQQuery(String queryQ, boolean isQueryAutocomplete,
+                                      List<String> queryFields, JsonObject options, Operator operator,
+                                      JsonObject boost, Map<String, JsonObject> searchParams) {
+         if (Helper.isNullOrEmpty(queryQ)) {
+@@ -221,7 +221,7 @@ public class SearchQueryBuilder {
+         }
+     }
+ 
+-    private static Query buildExistsQuery(List<String> exists) {
++    public static Query buildExistsQuery(List<String> exists) {
+         BoolQuery.Builder existsQuery = new BoolQuery.Builder();
+         exists.forEach(exist ->
+                 existsQuery.must(QueryBuilders.exists()
+@@ -233,7 +233,7 @@ public class SearchQueryBuilder {
+         return existsQuery.build()._toQuery();
+     }
+ 
+-    private static Query buildFacetQuery(HashMap<String, String[]> queryFacets, Constants.Operator queryFacetOperator,
++    public static Query buildFacetQuery(HashMap<String, String[]> queryFacets, Constants.Operator queryFacetOperator,
+                                          Constants.Operator queryFacetGroupOperator, Map<String, JsonObject> facets) {
+         BoolQuery.Builder facetQuery = new BoolQuery.Builder();
+ 
+diff --git a/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/SearchRequestBuilder.java b/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/SearchRequestBuilder.java
+index 211fe360..5e531dd7 100644
+--- a/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/SearchRequestBuilder.java
++++ b/src/main/java/io/piveau/hub/search/engine/impl/elasticsearch/SearchRequestBuilder.java
+@@ -1,13 +1,13 @@
+ package io.piveau.hub.search.engine.impl.elasticsearch;
+ 
+-import co.elastic.clients.elasticsearch._types.*;
+-import co.elastic.clients.elasticsearch._types.query_dsl.BoolQuery;
+-import co.elastic.clients.elasticsearch._types.query_dsl.Operator;
+-import co.elastic.clients.elasticsearch._types.query_dsl.Query;
++import co.elastic.clients.elasticsearch._types.Time;
++import co.elastic.clients.elasticsearch._types.query_dsl.*;
+ import co.elastic.clients.elasticsearch.core.SearchRequest;
+ import co.elastic.clients.elasticsearch.core.search.TrackHits;
++import co.elastic.clients.json.JsonData;
+ import io.piveau.hub.search.Constants;
+ import io.piveau.hub.search.Helper;
++import io.piveau.hub.search.security.AccessControlQueryBuilder;
+ import io.piveau.hub.search.security.AccessControlRuntimeMappingBuilder;
+ import io.piveau.hub.search.security.AccessControlUtils;
+ import io.piveau.hub.search.util.index.IndexManager;
+@@ -168,6 +168,205 @@ public class SearchRequestBuilder extends RequestBuilder {
+         return searchRequestBuilder.build();
+     }
+ 
++    /**
++     * Builds a hybrid search request by combining semantic and lexical queries.
++     *
++     * @param query The query parameters containing filters, sort options, pagination details, and other configurations.
++     * @param header The header parameters containing metadata or context-specific information for the request.
++     * @param indexManager The index manager providing metadata about indices, such as fields, facets, and configuration options.
++     * @param operator The search operator defining how logical connections between query clauses are handled.
++     * @return A {@link SearchRequest} object configured with the combined hybrid query, filters, sorting, and aggregations based on the input parameters.
++     */
++    public static SearchRequest buildHybridSearchRequest(QueryParams query, HeaderParams header, IndexManager indexManager, Operator operator) {
++        List<String> qFilters = query.getFilters();
++        List<String> qSort = query.getSort();
++
++        Integer maxResultWindow = 10000;
++        Integer maxAggSize = 100;
++        Map<String, Field> fields = new HashMap<>();
++        JsonObject options = new JsonObject();
++        Map<String, JsonObject> facets = new HashMap<>();
++        Map<String, JsonObject> searchParams = new HashMap<>();
++        JsonObject boost = new JsonObject();
++        SearchRequest.Builder searchRequestBuilder;
++
++        if (!Helper.isNullOrEmpty(qFilters) && qFilters.size() > 1) {
++            boost = JsonObject.mapFrom(query.getBoost());
++            List<String> indices = new ArrayList<>();
++            for (String qFilter : qFilters) {
++                Integer currentMaxResultWindow = indexManager.getMaxResultWindow().get(qFilter);
++                if (currentMaxResultWindow != null && currentMaxResultWindow < maxResultWindow) {
++                    maxResultWindow = currentMaxResultWindow;
++                }
++                Map<String, Field> currentFields = indexManager.getFields().get(qFilter);
++                if (fields.isEmpty()) {
++                    fields.putAll(currentFields);
++                } else {
++                    fields.entrySet().removeIf(entry -> {
++                        Field currentField = currentFields.get(entry.getKey());
++                        return currentField == null ||
++                                (entry.getValue().getSubFields() == null && currentField.getSubFields() != null) ||
++                                (entry.getValue().getSubFields() != null && currentField.getSubFields() == null);
++                    });
++                }
++                facets.putAll(indexManager.getFacets().get(qFilter));
++                searchParams.putAll(indexManager.getSearchParams().get(qFilter));
++                appendIndicesBasedOnQueryFilter(indices, qFilter, query.getVocabulary());
++            }
++            searchRequestBuilder = new SearchRequest.Builder()
++                    .index(indices)
++                    .aggregations("results_per_index", agg -> agg
++                            .terms(terms -> terms.field("_index")));
++        } else {
++            String index = qFilters.get(0);
++            maxResultWindow = indexManager.getMaxResultWindow().get(index);
++            maxAggSize = indexManager.getMaxAggSize().get(index);
++            fields = indexManager.getFields().get(index);
++            boost = indexManager.getBoost().get(index);
++            options = indexManager.getOptions().get(index);
++            facets = indexManager.getFacets().get(index);
++            searchParams = indexManager.getSearchParams().get(index);
++
++            searchRequestBuilder = setIndexInSearchRequest(index, query.getVocabulary(), query.getAlias());
++        }
++
++        // Build Hybrid Query
++        Query qQuery = SearchQueryBuilder.buildQQuery(query.getQ(), query.isAutocomplete(), query.getFields(), options, operator, boost, searchParams);
++
++        Query semanticQuery = buildSemanticQuery(query);
++
++        Query hybridQuery = BoolQuery.of(bool -> bool
++                .should(semanticQuery)
++                .should(qQuery)
++                .minimumShouldMatch("1")
++        )._toQuery();
++
++        // Build Filters
++        BoolQuery.Builder filterQueryBuilder = new BoolQuery.Builder();
++        filterQueryBuilder.must(hybridQuery);
++
++        if (!Helper.isNullOrEmpty(query.getExists())) {
++            filterQueryBuilder.must(SearchQueryBuilder.buildExistsQuery(query.getExists()));
++        }
++
++        if (!Helper.isNullOrEmpty(query.getFacets())) {
++            filterQueryBuilder.must(SearchQueryBuilder.buildFacetQuery(query.getFacets(), query.getFacetOperator(),
++                    query.getFacetGroupOperator(), facets));
++        }
++
++        if (AccessControlUtils.isEnabled() && header.getAccessControlContext() != null) {
++            AccessControlQueryBuilder.addRBACQuery(filterQueryBuilder, header.getAccessControlContext(), query.getAccessControlPermissions());
++        }
++
++        if (query.getSearchParams() != null && !Helper.isNullOrEmpty(searchParams)) {
++            QueryHelper.addSearchParamsQuery(searchParams, query.getSearchParams(), query.getDateType(), filterQueryBuilder);
++        }
++
++        searchRequestBuilder.query(filterQueryBuilder.build()._toQuery());
++        searchRequestBuilder.trackTotalHits(builder -> builder.enabled(true));
++
++        applyRange(query.getFrom(), query.getSize(), maxResultWindow, searchRequestBuilder::from, searchRequestBuilder::size);
++
++        if (!Helper.isNullOrEmpty(qSort) && fields != null) {
++            applySorting(searchRequestBuilder, qSort, fields, SearchRequest.Builder::sort);
++        }
++
++        if (!Helper.isNullOrEmpty(query.getIncludes())) {
++            applySourceConfig(searchRequestBuilder, query.getIncludes(), SearchRequest.Builder::source);
++        }
++
++        if (!Helper.isNullOrEmpty(facets)) {
++            applyAggregation(searchRequestBuilder, query.isAggregationAllFields(), query.getAggregationFields(), maxAggSize,
++                    facets, SearchRequest.Builder::aggregations);
++        }
++
++        if (query.isScroll()) {
++            searchRequestBuilder.scroll(Time.of(tBuilder -> tBuilder.time("60s")));
++        }
++
++        if (AccessControlUtils.isEnabled() && header.getAccessControlContext() != null) {
++            AccessControlRuntimeMappingBuilder.addRuntimeMappings(searchRequestBuilder, header.getAccessControlContext());
++        }
++
++        if (query.isShowScore()) {
++            searchRequestBuilder.explain(false);
++        }
++
++        return searchRequestBuilder.build();
++    }
++
++    /**
++     * Builds a semantic query by combining weighted embeddings for title, description,
++     * and keywords with a cosine similarity scoring mechanism. This method uses a script
++     * to*/
++    private static Query buildSemanticQuery(QueryParams query) {
++        float semanticBoost = 1.2f;
++        float semanticMinScore = 0.75f;
++        float effectiveSemanticMinScore = semanticMinScore * semanticBoost;
++
++        Map<String, JsonData> scriptParams = new HashMap<>();
++        scriptParams.put("queryVector", JsonData.of(query.getQueryVector()));
++        scriptParams.put("title_weight", JsonData.of(0.5f));
++        scriptParams.put("description_weight", JsonData.of(0.3f));
++        scriptParams.put("keywords_weight", JsonData.of(0.2f));
++        scriptParams.put("semantic_boost", JsonData.of(semanticBoost));
++        scriptParams.put("semantic_min_score", JsonData.of(semanticMinScore));
++
++        return ScriptScoreQuery.of(scriptScore -> scriptScore
++                .query(embeddingExistsQuery())
++                .minScore(effectiveSemanticMinScore)
++                .script(script -> script
++                        .lang("painless")
++                        .params(scriptParams)
++                        .source("""
++                    double weighted_score = 0.0;
++                    double weight_sum = 0.0;
++                    
++                    if (doc['title_embedding'].size() > 0) {
++                        double score = (cosineSimilarity(params.queryVector, 'title_embedding') + 1.0) / 2.0;
++                        weighted_score += score * params.title_weight;
++                        weight_sum += params.title_weight;
++                    }
++
++                    if (doc['description_embedding'].size() > 0) {
++                        double score = (cosineSimilarity(params.queryVector, 'description_embedding') + 1.0) / 2.0;
++                        weighted_score += score * params.description_weight;
++                        weight_sum += params.description_weight;
++                    }
++
++                    if (doc['keywords_embedding'].size() > 0) {
++                        double score = (cosineSimilarity(params.queryVector, 'keywords_embedding') + 1.0) / 2.0;
++                        weighted_score += score * params.keywords_weight;
++                        weight_sum += params.keywords_weight;
++                    }
++                    
++                    double semantic_score = weight_sum > 0 ? weighted_score / weight_sum : 0.0;
++                    
++                    if (semantic_score < params.semantic_min_score) {
++                        return 0.0;
++                    }
++                    
++                    return semantic_score * params.semantic_boost;
++                    """)
++                )
++        )._toQuery();
++    }
++
++    /**
++     * Constructs a boolean query to check for the existence of embedding fields ('title_embedding',
++     * 'description_embedding', or 'keywords_embedding') in the documents.
++     *
++     * @return A {@link Query} object representing the boolean query with the specified existence checks.
++     */
++    private static Query embeddingExistsQuery() {
++        return BoolQuery.of(bool -> bool
++                .should(ExistsQuery.of(exists -> exists.field("title_embedding"))._toQuery())
++                .should(ExistsQuery.of(exists -> exists.field("description_embedding"))._toQuery())
++                .should(ExistsQuery.of(exists -> exists.field("keywords_embedding"))._toQuery())
++                .minimumShouldMatch("1")
++        )._toQuery();
++    }
++
+     private static void appendIndicesBasedOnQueryFilter(List<String> indices, String qFilter,
+                                                         List<String> qVocabularies) {
+         if (Constants.DOC_TYPE_VOCABULARY.equals(qFilter)) {
 diff --git a/src/main/java/io/piveau/hub/search/engine/impl/opensearch/OpenSearchSearchClientImpl.java b/src/main/java/io/piveau/hub/search/engine/impl/opensearch/OpenSearchSearchClientImpl.java
 index b1df90c5..346be2c5 100644
 --- a/src/main/java/io/piveau/hub/search/engine/impl/opensearch/OpenSearchSearchClientImpl.java
@@ -655,18 +828,34 @@ index b1df90c5..346be2c5 100644
      }
 -
  }
+diff --git a/src/main/java/io/piveau/hub/search/handler/DatasetHandler.java b/src/main/java/io/piveau/hub/search/handler/DatasetHandler.java
+index 127d2c5e..1eda2f5e 100644
+--- a/src/main/java/io/piveau/hub/search/handler/DatasetHandler.java
++++ b/src/main/java/io/piveau/hub/search/handler/DatasetHandler.java
+@@ -160,4 +160,10 @@ public class DatasetHandler extends ContextHandler {
+             context.response().setStatusCode(202).end();
+         }
+     }
++
++    public void triggerDatasetEmbeddingEnrichment(RoutingContext context) {
++        LOG.info("Trigger dataset embedding enrichment, remote address: {}", context.request().connection().remoteAddress());
++        datasetsService.triggerDatasetEmbeddingEnrichment();
++        context.response().setStatusCode(200).end();
++    }
+ }
 diff --git a/src/main/java/io/piveau/hub/search/services/datasets/DatasetsService.java b/src/main/java/io/piveau/hub/search/services/datasets/DatasetsService.java
-index e6d1ad83..e09d1a26 100644
+index e6d1ad83..6968ac58 100644
 --- a/src/main/java/io/piveau/hub/search/services/datasets/DatasetsService.java
 +++ b/src/main/java/io/piveau/hub/search/services/datasets/DatasetsService.java
-@@ -36,4 +36,5 @@ public interface DatasetsService {
+@@ -36,4 +36,6 @@ public interface DatasetsService {
      Future<Void> deleteDatasetRevision(String revisionId);
      Future<String> triggerSyncScores();
  
-+    Future<Void> triggerReindexingWithEmbeddings();
++    // Future<Void> triggerReindexingWithEmbeddings(); // TODO: Remove
++    Future<Void> triggerDatasetEmbeddingEnrichment();
  }
 diff --git a/src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java b/src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java
-index d0f4f6d2..ddeb2d30 100644
+index d0f4f6d2..c2c17d55 100644
 --- a/src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java
 +++ b/src/main/java/io/piveau/hub/search/services/datasets/DatasetsServiceImpl.java
 @@ -4,6 +4,7 @@ import co.elastic.clients.json.JsonData;
@@ -693,109 +882,346 @@ index d0f4f6d2..ddeb2d30 100644
  
          this.serviceContext = new PiveauContext("hub.search", "DatasetsService");
      }
-@@ -103,6 +106,7 @@ public class DatasetsServiceImpl implements DatasetsService {
+@@ -97,12 +100,16 @@ public class DatasetsServiceImpl implements DatasetsService {
+     public Future<JsonObject> createDataset(JsonObject payload) {
+ 
+         PiveauContext resourceContext = serviceContext.extend(getResourceContext(null, payload));
++
++        resourceContext.log().debug("createDataset(): was called with payload.");
++
+         DateChecker.check(payload);
+         SpatialChecker.check(payload);
+         hvdSetter.set(payload);
  
          return cataloguesService.resolveCatalogueInPayload(Constants.DOC_TYPE_DATASET, payload)
                  .compose(vocabularyService::replaceVocabularyInPayload)
-+                .compose(embeddingService::enrichDatasetWithEmbeddings)  // Compute and add word-embeddings
++                // .compose(embeddingService::enrichDatasetWithEmbeddings) // Compute and add word-embeddings
                  .compose(document -> searchClient.postDocument(Constants.DOC_TYPE_DATASET, document))
                  .onSuccess(result -> resourceContext.log().debug("Post success: " + result))
                  .map(result -> ReturnHelper.returnSuccess(201, new JsonObject().put("id", result)));
-@@ -117,6 +121,8 @@ public class DatasetsServiceImpl implements DatasetsService {
+@@ -111,12 +118,17 @@ public class DatasetsServiceImpl implements DatasetsService {
+     @Override
+     public Future<JsonObject> createOrUpdateDataset(String datasetId, JsonObject payload) {
+         PiveauContext resourceContext = serviceContext.extend(getResourceContext(datasetId, payload));
++
++        resourceContext.log().debug("createOrUpdateDataset(): was called for datasetID {} with payload.", datasetId);
++
+         DateChecker.check(payload);
+         SpatialChecker.check(payload);
+         hvdSetter.set(payload);
  
          return cataloguesService.resolveCatalogueInPayload(Constants.DOC_TYPE_DATASET, payload)
                  .compose(vocabularyService::replaceVocabularyInPayload)
 +                // Compute and enrich dataset with word-embeddings
-+                .compose(embeddingService::enrichDatasetWithEmbeddings)
++                // .compose(embeddingService::enrichDatasetWithEmbeddings)
                  // Get old dataset (or empty if not found) and merge quality_meas
                  .compose(replaceVocabularyResult -> searchClient.getDocument(Constants.DOC_TYPE_DATASET,
                                  Constants.getReadAlias(Constants.DOC_TYPE_DATASET), datasetId)
-@@ -173,6 +179,7 @@ public class DatasetsServiceImpl implements DatasetsService {
+@@ -160,6 +172,9 @@ public class DatasetsServiceImpl implements DatasetsService {
+     @Override
+     public Future<JsonObject> modifyDataset(String datasetId, JsonObject payload) {
+         PiveauContext resourceContext = serviceContext.extend(getResourceContext(datasetId, payload));
++
++        resourceContext.log().debug("modifyDataset(): was called for datasetID {} with new payload.", datasetId);
++
+         DateChecker.check(payload);
+         SpatialChecker.check(payload);
+         AtomicReference<JsonObject> content = new AtomicReference<>(payload);
+@@ -173,6 +188,7 @@ public class DatasetsServiceImpl implements DatasetsService {
                      }
                  })
                  .compose(vocabularyService::replaceVocabularyInPayload)
-+                .compose(embeddingService::enrichDatasetWithEmbeddings)
++                // .compose(embeddingService::enrichDatasetWithEmbeddings)
                  .compose(result -> {
                      content.set(result);
                      return searchClient.getDocument(Constants.DOC_TYPE_DATASET,
-@@ -244,6 +251,19 @@ public class DatasetsServiceImpl implements DatasetsService {
+@@ -234,23 +250,180 @@ public class DatasetsServiceImpl implements DatasetsService {
+                 });
+     }
  
-         return cataloguesService.resolveCatalogueInPayloadArray(Constants.DOC_TYPE_DATASET, payload)
-                 .compose(vocabularyService::replaceVocabularyInPayloadList)
-+                .compose(list -> {
-+                    List<Future<JsonObject>> futures = new ArrayList<>();
-+                    for (int i = 0; i < list.size(); i++) {
-+                        futures.add(embeddingService.enrichDatasetWithEmbeddings(list.getJsonObject(i)));
-+                    }
-+                    return Future.all(futures).map(compositeFuture -> {
-+                        JsonArray enrichedArray = new JsonArray();
-+                        for (int i = 0; i < list.size(); i++) {
-+                            enrichedArray.add(compositeFuture.<JsonObject>resultAt(i));
-+                        }
-+                        return enrichedArray;
-+                    });
-+                })
-                 .compose(content -> searchClient.putDocumentsBulk(
++    // TODO: Remove old createOrUpdateDatasetBulk implementation
++
++//    @Override
++//    public Future<JsonArray> createOrUpdateDatasetBulk(JsonArray payload) {
++//        PiveauContext resourceContext = serviceContext.extend("bulk");
++//
++//        DateChecker.check(payload);
++//        SpatialChecker.check(payload);
++//        hvdSetter.set(payload);
++//
++//        return cataloguesService.resolveCatalogueInPayloadArray(Constants.DOC_TYPE_DATASET, payload)
++//                .compose(vocabularyService::replaceVocabularyInPayloadList)
++//                .compose(list -> {
++//                    List<Future<JsonObject>> futures = new ArrayList<>();
++//                    for (int i = 0; i < list.size(); i++) {
++//                        futures.add(embeddingService.enrichDatasetWithEmbeddings(list.getJsonObject(i)));
++//                    }
++//                    return Future.all(futures).map(compositeFuture -> {
++//                        JsonArray enrichedArray = new JsonArray();
++//                        for (int i = 0; i < list.size(); i++) {
++//                            enrichedArray.add(compositeFuture.<JsonObject>resultAt(i));
++//                        }
++//                        return enrichedArray;
++//                    });
++//                })
++//                .compose(content -> searchClient.putDocumentsBulk(
++//                        Constants.DOC_TYPE_DATASET,
++//                        "dataset-revisions",
++//                        List.of(QUALITY_MEAS),
++//                        content))
++//                .onSuccess(result -> resourceContext.log().debug("Put bulk success: {}", result))
++//                .onFailure(failure -> resourceContext.log().error("Put bulk failed", failure));
++//    }
++
++
+     @Override
+     public Future<JsonArray> createOrUpdateDatasetBulk(JsonArray payload) {
+-        PiveauContext resourceContext = serviceContext.extend("bulk");
++        PiveauContext resourceContext = serviceContext.extend("bulk-background");
+ 
+         DateChecker.check(payload);
+         SpatialChecker.check(payload);
+         hvdSetter.set(payload);
+ 
+-        return cataloguesService.resolveCatalogueInPayloadArray(Constants.DOC_TYPE_DATASET, payload)
+-                .compose(vocabularyService::replaceVocabularyInPayloadList)
+-                .compose(content -> searchClient.putDocumentsBulk(
++        String jobId = UUID.randomUUID().toString();
++        JsonArray backgroundPayload = payload.copy();
++
++        vertx.runOnContext(v -> processDatasetBulkInBackground(jobId, backgroundPayload, resourceContext));
++
++        resourceContext.log().info("createOrUpdateDatasetBulk(): Accepted dataset bulk enrichment job {} with {} datasets for background processing.", jobId, backgroundPayload.size());
++
++        return Future.succeededFuture(new JsonArray()
++            .add(new JsonObject()
++                .put("status", 202)
++                .put("jobId", jobId)
++                .put("message", "Dataset bulk enrichment accepted for background processing")
++                .put("accepted", backgroundPayload.size())));
++    }
++
++    /**
++     * Process a bulk dataset enrichment job in the background by resolving catalogues, enriching datasets
++     * with vocabulary replacements, and storing the resulting enriched datasets.
++     *
++     * @param jobId            The identifier for the background bulk processing job.
++     * @param payload          The array of dataset payloads to be enriched and processed in bulk.
++     * @param resourceContext  The context providing logging and operational resources for background processing.
++     */
++    private void processDatasetBulkInBackground(String jobId, JsonArray payload, PiveauContext resourceContext) {
++        resourceContext.log().info(
++            "Starting background dataset bulk enrichment job {} with {} datasets.",
++            jobId,
++            payload.size()
++        );
++
++        cataloguesService.resolveCatalogueInPayloadArray(Constants.DOC_TYPE_DATASET, payload)
++            .compose(vocabularyService::replaceVocabularyInPayloadList)
++            .compose(list -> enrichAndStoreDatasetBulkBatch(jobId, list, 0, new JsonArray(), resourceContext))
++            .onSuccess(v -> resourceContext.log().info("Finished background dataset bulk enrichment job {} with {} datasets.", jobId, payload.size()))
++            .onFailure(failure -> resourceContext.log().error("Background dataset bulk enrichment job {} failed: {}", jobId, failure.getMessage(), failure));
++    }
++
++    /**
++     * Processes a bulk batch of datasets for enrichment with text embeddings and stores the enriched datasets in dataset index.
++     * The method recursively processes datasets in batches, enriching each with additional embeddings and storing them
++     * in bulk into the search index. In cases where embedding enrichment fails for a specific dataset, it logs the failure
++     * and proceeds to store the dataset without the new embeddings.
++     *
++     * @param jobId          The identifier for the bulk processing job.
++     * @param datasets       The array of datasets to be enriched and stored.
++     * @param index          The current index of the dataset array to start processing from.
++     * @param batch          The batch of datasets being prepared for storage.
++     * @param resourceContext The context containing logging and operational resources needed for processing.
++     * @return A {@code Future<Void>} that completes when all datasets in the provided array are processed.
++     */
++    private Future<Void> enrichAndStoreDatasetBulkBatch(String jobId, JsonArray datasets, int index, JsonArray batch, PiveauContext resourceContext) {
++
++        final int bulkBatchSize = 25;
++
++        if (index >= datasets.size()) {
++            if (batch.isEmpty()) {
++                return Future.succeededFuture();
++            }
++
++            return searchClient.putDocumentsBulk(
++                    Constants.DOC_TYPE_DATASET,
++                    "dataset-revisions",
++                    List.of(QUALITY_MEAS),
++                    batch)
++                .onSuccess(result -> resourceContext.log().info(
++                    "Background dataset bulk enrichment job {} stored final batch with {} datasets.",
++                    jobId,
++                    batch.size()
++                ))
++                .onFailure(failure -> resourceContext.log().error(
++                    "Background dataset bulk enrichment job {} failed while storing final batch: {}",
++                    jobId,
++                    failure.getMessage(),
++                    failure
++                ))
++                .mapEmpty();
++        }
++
++        JsonObject dataset = datasets.getJsonObject(index);
++
++        return embeddingService.enrichDatasetWithEmbeddings(dataset)
++            .recover(failure -> {
++                String datasetId = dataset.getString("id", "id-not-available");
++                resourceContext.log().error(
++                    "Background dataset bulk enrichment job {} failed to enrich dataset {}: {}. Storing dataset without new embeddings.",
++                    jobId,
++                    datasetId,
++                    failure.getMessage(),
++                    failure
++                );
++                return Future.succeededFuture(dataset);
++            })
++            .compose(enrichedDataset -> {
++                batch.add(enrichedDataset);
++
++                if (batch.size() < bulkBatchSize) {
++                    return Future.succeededFuture();
++                }
++
++                JsonArray batchToStore = batch.copy();
++                batch.clear();
++
++                return searchClient.putDocumentsBulk(
                          Constants.DOC_TYPE_DATASET,
                          "dataset-revisions",
-@@ -493,4 +513,60 @@ public class DatasetsServiceImpl implements DatasetsService {
+                         List.of(QUALITY_MEAS),
+-                        content))
+-                .onSuccess(result -> resourceContext.log().debug("Put bulk success: {}", result))
+-                .onFailure(failure -> resourceContext.log().error("Put bulk failed", failure));
++                        batchToStore)
++                    .onSuccess(result -> resourceContext.log().info(
++                        "Background dataset bulk enrichment job {} stored batch ending at dataset {}/{} with {} datasets.",
++                        jobId,
++                        index + 1,
++                        datasets.size(),
++                        batchToStore.size()
++                    ))
++                    .onFailure(failure -> resourceContext.log().error(
++                        "Background dataset bulk enrichment job {} failed while storing batch ending at dataset {}/{}: {}",
++                        jobId,
++                        index + 1,
++                        datasets.size(),
++                        failure.getMessage(),
++                        failure
++                    ))
++                    .mapEmpty();
++            })
++            .compose(v -> enrichAndStoreDatasetBulkBatch(
++                jobId,
++                datasets,
++                index + 1,
++                batch,
++                resourceContext
++            ));
+     }
+ 
+     @Override
+@@ -493,4 +666,101 @@ public class DatasetsServiceImpl implements DatasetsService {
          return Future.succeededFuture(JsonData.of(revision));
      }
  
-+    @Override
-+    public Future<Void> triggerReindexingWithEmbeddings() {
++// TODO: Remove
 +
-+        log.info("Starting reindexing embeddings for all datasets.");
++//    @Override
++//    public Future<Void> triggerReindexingWithEmbeddings() {
++//
++//        log.info("Starting reindexing embeddings for all datasets.");
++//
++//        QueryParams query = new QueryParams();
++//        query.setFilters(List.of(Constants.DOC_TYPE_DATASET));
++//        query.setAggregation(false);
++//        query.setSize(100);
++//        query.setScroll(true);
++//
++//        HeaderParams header = new HeaderParams();
++//
++//        return searchClient.listIds(query, header, false, true)
++//            .compose(ids -> {
++//
++//                Future<Void> chain = Future.succeededFuture();
++//                final int numberOfDocuments = ids.size();
++//
++//                log.info("Reindexing: {} datasets found, start enriching datasets with embeddings", numberOfDocuments);
++//
++//                for (int i = 0; i < numberOfDocuments; i++) {
++//                    final String id = ids.getString(i);
++//                    final int index = i;
++//
++//                    chain = chain.compose(v ->
++//                        searchClient.getDocument(Constants.DOC_TYPE_DATASET, Constants.getReadAlias(Constants.DOC_TYPE_DATASET), id)
++//                            .compose(doc -> {
++//                                if (doc == null) {
++//                                    log.error("Reindexing [{}]: skipping iffy null-document", id);
++//                                    return Future.<Void>succeededFuture();
++//                                }
++//
++//                                return embeddingService.enrichDatasetWithEmbeddings(doc)
++//                                    .compose(enriched -> {
++//                                        String writeAlias = Constants.getWriteAlias(Constants.DOC_TYPE_DATASET);
++//                                        return searchClient.putDocument(Constants.DOC_TYPE_DATASET, id, enriched, writeAlias, true)
++//                                            .onSuccess(res -> log.info("Reindexing {}/{} [{}]: putDocument to {} successful (result={})", index, numberOfDocuments, id, writeAlias, res))
++//                                            .onFailure(err -> log.error("Reindexing [{}]: putDocument failed with error: {}", id, err.getMessage()));
++//                                    })
++//                                    .mapEmpty();
++//                            })
++//                            .recover(err -> {
++//                                log.error("Reindexing [{}]: failed with error: {}", id, err.getMessage());
++//                                return Future.<Void>succeededFuture();
++//                            })
++//                    );
++//                }
++//
++//                return chain;
++//            })
++//            .onSuccess(v -> log.info("Reindexing all datasets with embeddings completed successfully"))
++//            .onFailure(err -> log.error("Reindexing all datasets with embeddings failed", err))
++//            .mapEmpty();
++//    }
++
++    @Override
++    public Future<Void> triggerDatasetEmbeddingEnrichment() {
++        log.info("Triggering dataset embedding enrichment for all datasets.");
 +
 +        QueryParams query = new QueryParams();
 +        query.setFilters(List.of(Constants.DOC_TYPE_DATASET));
 +        query.setAggregation(false);
-+        query.setSize(10000);
 +        query.setScroll(true);
++        query.setSize(100);
 +
-+        HeaderParams header = new HeaderParams();
++        searchClient.listIds(query, new HeaderParams(), false, true)
++            .onSuccess(ids -> {
++                log.info("Found {} datasets for embedding enrichment.", ids.size());
++                JsonArray datasetsToEnrich = new JsonArray();
++                List<Future<Void>> fetchFutures = new ArrayList<>();
 +
-+        return searchClient.listIds(query, header, false, true)
-+            .compose(ids -> {
-+
-+                Future<Void> chain = Future.succeededFuture();
-+                final int numberOfDocuments = ids.size();
-+
-+                log.info("Reindexing: {} datasets found, start enriching datasets with embeddings", numberOfDocuments);
-+
-+                for (int i = 0; i < numberOfDocuments; i++) {
-+                    final String id = ids.getString(i);
-+                    final int index = i;
-+
-+                    chain = chain.compose(v ->
++                for (int i = 0; i < ids.size(); i++) {
++                    String id = ids.getString(i);
++                    fetchFutures.add(
 +                        searchClient.getDocument(Constants.DOC_TYPE_DATASET, Constants.getReadAlias(Constants.DOC_TYPE_DATASET), id)
-+                            .compose(doc -> {
-+                                if (doc == null) {
-+                                    log.error("Reindexing [{}]: skipping iffy null-document", id);
-+                                    return Future.<Void>succeededFuture();
++                            .onSuccess(doc -> {
++                                if (doc != null) {
++                                    datasetsToEnrich.add(doc);
 +                                }
-+
-+                                return embeddingService.enrichDatasetWithEmbeddings(doc)
-+                                    .compose(enriched -> {
-+                                        String writeAlias = Constants.getWriteAlias(Constants.DOC_TYPE_DATASET);
-+                                        return searchClient.putDocument(Constants.DOC_TYPE_DATASET, id, enriched, writeAlias, true)
-+                                            .onSuccess(res -> log.info("Reindexing {}/{} [{}]: putDocument to {} successful (result={})", index, numberOfDocuments, id, writeAlias, res))
-+                                            .onFailure(err -> log.error("Reindexing [{}]: putDocument failed with error: {}", id, err.getMessage()));
-+                                    })
-+                                    .mapEmpty();
 +                            })
-+                            .recover(err -> {
-+                                log.error("Reindexing [{}]: failed with error: {}", id, err.getMessage());
-+                                return Future.<Void>succeededFuture();
-+                            })
++                            .mapEmpty()
 +                    );
 +                }
 +
-+                return chain;
++                Future.all(fetchFutures).onSuccess(v -> {
++                    log.info("Fetched {} datasets, starting bulk background processing.", datasetsToEnrich.size());
++                    createOrUpdateDatasetBulk(datasetsToEnrich);
++                }).onFailure(err -> log.error("Failed to fetch all datasets for embedding enrichment", err));
 +            })
-+            .onSuccess(v -> log.info("Reindexing all datasets with embeddings completed successfully"))
-+            .onFailure(err -> log.error("Reindexing all datasets with embeddings failed", err))
-+            .mapEmpty();
++            .onFailure(err -> log.error("Failed to list IDs for dataset embedding enrichment", err));
++
++        return Future.succeededFuture();
 +    }
 +
  }
@@ -831,10 +1257,10 @@ index 00000000..8d78f751
 +}
 diff --git a/src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceImpl.java b/src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceImpl.java
 new file mode 100644
-index 00000000..f6abb361
+index 00000000..6045f930
 --- /dev/null
 +++ b/src/main/java/io/piveau/hub/search/services/embeddings/EmbeddingServiceImpl.java
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,179 @@
 +package io.piveau.hub.search.services.embeddings;
 +
 +import io.piveau.hub.search.Constants;
@@ -844,6 +1270,7 @@ index 00000000..f6abb361
 +import io.vertx.core.json.JsonArray;
 +import io.vertx.core.json.JsonObject;
 +import io.vertx.ext.web.client.WebClient;
++import io.vertx.ext.web.client.WebClientOptions;
 +import io.vertx.ext.web.client.predicate.ResponsePredicate;
 +import org.slf4j.Logger;
 +import org.slf4j.LoggerFactory;
@@ -856,7 +1283,12 @@ index 00000000..f6abb361
 +  private final String model;
 +
 +  EmbeddingServiceImpl(Vertx vertx, JsonObject config) {
-+    this.webClient = WebClient.create(vertx);
++    // this.webClient = WebClient.create(vertx);
++    this.webClient = WebClient.create(vertx, new WebClientOptions()
++        .setKeepAlive(true)
++        .setMaxPoolSize(3)
++        .setConnectTimeout(10000)
++        .setIdleTimeout(10000));
 +
 +    // Konfiguration für Ollama-Endpunkt und Modelnamen einlesen
 +    JsonObject embeddingConfig = ConfigHelper.forConfig(config).forceJsonObject(Constants.ENV_PIVEAU_HUB_SEARCH_EMBEDDING_CONFIG);
@@ -905,6 +1337,9 @@ index 00000000..f6abb361
 +    String description = extractDescription(dataset);
 +    String[] keywords = extractKeywords(dataset);
 +    String joinedKeywords = String.join(", ", keywords);
++
++    // TODO: Change from info to debug message
++    log.info("Enriching dataset with embeddings: title='{}', descriptionPresent={}, keywordCount={}", title, description != null && !description.isBlank(), keywords.length);
 +
 +    // Create embedding futures for concurrent embedding generation
 +    Future<JsonArray> titleFuture = generateEmbedding(title);
@@ -1175,6 +1610,38 @@ index 35af9a43..24cc75bf 100644
          } else {
              return Future.failedFuture(new ServiceException(400, "One or more search filters is unknown"));
          }
+diff --git a/src/main/java/io/piveau/hub/search/shell/ShellVerticle.java b/src/main/java/io/piveau/hub/search/shell/ShellVerticle.java
+index 3c5245f2..f64eea83 100644
+--- a/src/main/java/io/piveau/hub/search/shell/ShellVerticle.java
++++ b/src/main/java/io/piveau/hub/search/shell/ShellVerticle.java
+@@ -106,6 +106,7 @@ public class ShellVerticle extends AbstractVerticle {
+ 
+ //                registry.registerCommand(buildReindexCataloguesCommand().build(vertx)),
+                 registry.registerCommand(buildSyncScoresCommand().build(vertx)),
++                registry.registerCommand(buildTriggerDatasetEmbeddingEnrichmentCommand().build(vertx)),
+ //                registry.registerCommand(buildResetWebrootCommand().build(vertx)),
+                 registry.registerCommand(buildTriggerSitemapGenerationCommand().build(vertx))
+         );
+@@ -220,6 +221,19 @@ public class ShellVerticle extends AbstractVerticle {
+         );
+     }
+ 
++    private CommandBuilder buildTriggerDatasetEmbeddingEnrichmentCommand() {
++        CommandBuilder triggerEnrichment = CommandBuilder.command("triggerDatasetEmbeddingEnrichment");
++        return triggerEnrichment.processHandler(process -> datasetsService.triggerDatasetEmbeddingEnrichment()
++                .onSuccess(v -> {
++                    process.write("Triggered dataset embedding enrichment successfully\n");
++                    process.end();
++                }).onFailure(failure -> {
++                    process.write("Trigger failure: " + failure + "\n");
++                    process.end();
++                })
++        );
++    }
++
+     private CommandBuilder buildIndexXmlVocabulariesCommand() {
+         CommandBuilder indexXmlVocabularies = CommandBuilder.command("indexXmlVocabularies");
+         WebClient webClient = WebClient.create(vertx);
 diff --git a/src/main/java/io/piveau/hub/search/util/request/QueryParams.java b/src/main/java/io/piveau/hub/search/util/request/QueryParams.java
 index 87580106..1e5e7f55 100644
 --- a/src/main/java/io/piveau/hub/search/util/request/QueryParams.java
@@ -1241,7 +1708,7 @@ index 87580106..1e5e7f55 100644
      }
  }
 diff --git a/src/main/resources/webroot/openapi.yaml b/src/main/resources/webroot/openapi.yaml
-index 0d434687..9a62c52a 100644
+index 0d434687..93f15233 100644
 --- a/src/main/resources/webroot/openapi.yaml
 +++ b/src/main/resources/webroot/openapi.yaml
 @@ -264,6 +264,12 @@ paths:
@@ -1257,7 +1724,31 @@ index 0d434687..9a62c52a 100644
          - in: query
            name: accessControlPermissions
            description: Filter by access control permissions. Specify the access control permissions (view, edit, publish, delete) required for resources to be returned.
-@@ -1785,6 +1791,10 @@ components:
+@@ -1055,6 +1061,23 @@ paths:
+         '500':
+           $ref: '#/components/responses/InternalServerError'
+ 
++  /bulk/datasets/embeddings:
++    post:
++      description: As an authorized user you can trigger a background job to enrich all datasets with embeddings. The operation starts immediately and returns 200 OK. This function is reserved for internal use only and is not part of our public API.
++      summary: Trigger bulk embedding enrichment for all dataset-documents
++      operationId: triggerDatasetEmbeddingEnrichment
++      tags:
++        - Datasets
++      security:
++        - ApiKeyAuth: []
++      responses:
++        '200':
++          description: OK
++        '401':
++          description: Unauthorized
++        '500':
++          $ref: '#/components/responses/InternalServerError'
++
+   /catalogues:
+     get:
+       description: You can get a list of catalogues making a GET request to specified URL of the API endpoint with the  the resource path "catalogues" at the end. If successful, the response contains an array with IDs of all the catalogues.
+@@ -1785,6 +1808,10 @@ components:
          countryData:
            type: boolean
            description: If enabled only datasets from country catalogues are returned. If disabled only datasets from non-country catalogues are returned. If not specified (null), no filtering is performed.
@@ -1431,10 +1922,10 @@ index 00000000..295e303d
 +}
 diff --git a/src/test/java/io/piveau/hub/search/services/datasets/DatasetsServiceTest.java b/src/test/java/io/piveau/hub/search/services/datasets/DatasetsServiceTest.java
 new file mode 100644
-index 00000000..aff1c6be
+index 00000000..cb82b0fb
 --- /dev/null
 +++ b/src/test/java/io/piveau/hub/search/services/datasets/DatasetsServiceTest.java
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,286 @@
 +package io.piveau.hub.search.services.datasets;
 +
 +import co.elastic.clients.elasticsearch.core.search.Hit;
@@ -1546,7 +2037,8 @@ index 00000000..aff1c6be
 +          esConfig.getString("host", "localhost"),
 +          esConfig.getInteger("port", 9200)
 +        )
-+        .compose(v -> datasetService.triggerReindexingWithEmbeddings())
++        // .compose(v -> datasetService.triggerReindexingWithEmbeddings()) // TODO: Remove
++        .compose(v -> datasetService.triggerDatasetEmbeddingEnrichment())
 +        .compose(v -> {
 +            // Make sure ES index has refreshed, by waiting for 2 seconds
 +            Promise<Void> refreshPromise = Promise.promise();
@@ -1579,7 +2071,7 @@ index 00000000..aff1c6be
 +
 +  @Test
 +  @DisplayName("Test bulk indexing with embeddings")
-+  @Timeout(value = 120, timeUnit = java.util.concurrent.TimeUnit.MINUTES) // Embeddings may take a while to generate
++  @Timeout(value = 240, timeUnit = java.util.concurrent.TimeUnit.MINUTES) // Embeddings may take a while to generate
 +  void testBulkEmbeddingGeneration(Vertx vertx, VertxTestContext testContext) {
 +
 +    JsonObject esConfig = createElasticsearchTestConfig();
@@ -1636,10 +2128,10 @@ index 00000000..aff1c6be
 +        })
 +        .compose(datasetService::createOrUpdateDatasetBulk)
 +        .compose(v -> {
-+            // Make sure ES index has refreshed, by waiting for 2 seconds
-+            // Without waiting, the index may not contain the newly created documents yet
++            // Wait long enough so that the background processing can finish successfully.
++            // The test will fail if not all dataset-documents have been enriched and indexed with embeddings.
 +            Promise<Void> refreshPromise = Promise.promise();
-+            vertx.setTimer(2000, id -> refreshPromise.complete());
++            vertx.setTimer(2400000, id -> refreshPromise.complete());
 +            return refreshPromise.future();
 +        })
 +        .compose(v -> {
@@ -1684,6 +2176,39 @@ index 00000000..aff1c6be
 +      }
 +    }
 +    assertFalse(allZeros, "Document " + id + " embedding " + embeddingField + " must not contain all zeros");
++  }
++
++  @Test
++  @DisplayName("Test triggerDatasetEmbeddingEnrichment")
++  @Timeout(value = 240, timeUnit = java.util.concurrent.TimeUnit.MINUTES)
++  void testTriggerDatasetEmbeddingEnrichment(Vertx vertx, VertxTestContext testContext) {
++
++    JsonObject esConfig = createElasticsearchTestConfig();
++    IndexManager indexManager = IndexManager.create(vertx, esConfig, null);
++    DatasetsService datasetService = DatasetsService.create(vertx, esConfig, indexManager).result();
++    SearchClient searchClient = SearchClient.build(vertx, esConfig, indexManager);
++
++    // Register mocks
++    CataloguesService cataloguesService = mock(CataloguesService.class);
++    when(cataloguesService.resolveCatalogueInPayloadArray(eq(Constants.DOC_TYPE_DATASET), any(JsonArray.class)))
++            .thenAnswer(invocation -> Future.succeededFuture(invocation.getArgument(1)));
++    new ServiceBinder(vertx).setAddress(CataloguesService.SERVICE_ADDRESS).register(CataloguesService.class, cataloguesService);
++
++    VocabularyService vocabularyService = mock(VocabularyService.class);
++    when(vocabularyService.replaceVocabularyInPayloadList(any(JsonArray.class)))
++            .thenAnswer(invocation -> Future.succeededFuture(invocation.getArgument(0)));
++    new ServiceBinder(vertx).setAddress(VocabularyService.SERVICE_ADDRESS).register(VocabularyService.class, vocabularyService);
++
++    PollingUtils.waitForElasticsearchReady(vertx, esConfig.getString("host", "localhost"), esConfig.getInteger("port", 9200))
++            .compose(v -> datasetService.triggerDatasetEmbeddingEnrichment())
++            .compose(v -> {
++                // Wait for background processing triggering.
++                Promise<Void> promise = Promise.promise();
++                vertx.setTimer(10000, id -> promise.complete());
++                return promise.future();
++            })
++            .onComplete(testContext.succeeding(v -> testContext.completeNow()))
++            .onFailure(testContext::failNow);
 +  }
 +
 +}
